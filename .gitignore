@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 环境与密钥（永远不要提交）
+.env
+.env.*
+!.env.example
+
+# 数据与产物
+data/
+*.log
+charts/
+reports/*.png
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
