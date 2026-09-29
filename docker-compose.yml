@@ -37,6 +37,28 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # ---- DataCrew API（D3 接入容器）----
+  # 容器内 PG/Redis 走 compose 服务名解析（localhost 指向容器自身，连不上）
+  app:
+    build: .
+    container_name: datacrew-app
+    command: ["python", "-m", "app.main"]
+    environment:
+      PG_ADMIN_DSN: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ecommerce
+      PG_RO_DSN: postgresql://datacrew_ro:datacrew_ro_pwd@postgres:5432/ecommerce
+      REDIS_URL: redis://redis:6379/0
+      LLM_MODE: ${LLM_MODE:-mock}
+      API_KEYS: ${API_KEYS:-dev-key-001}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   # ---- MinIO（网络恢复后取消注释）----
   # minio:
   #   image: minio/minio:latest

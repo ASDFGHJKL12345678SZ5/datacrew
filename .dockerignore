@@ -1,0 +1,21 @@
+# 构建上下文里这些都不该进镜像：.venv 是开发机的（几百 MB），
+# .git/reports/data 与运行无关。Dockerfile 只 COPY pyproject/app/eval。
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.github/
+.env
+.env.*
+reports/
+data/
+tests/
+demo/
+scripts/
+docs/
+*.md
+!README.md
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
