@@ -41,6 +41,32 @@
                     datacrew_ro 只读角色    三级缓存          图表/导出
 ```
 
+状态机图（GitHub 可直接渲染；节点名与 app/agents/supervisor.py 一致）：
+
+```mermaid
+flowchart TD
+    U("用户提问") --> SC["schema_curator<br/>Schema 检索 + 口径歧义检测"]
+    SC -->|指标口径歧义| CLAR{{"interrupt：澄清追问"}}
+    CLAR -->|用户回答后恢复| SC
+    SC --> SG["sql_generator<br/>CoT 生成 SQL"]
+    SG --> EX["executor<br/>MCP sql_execute：七道闸"]
+    EX -->|大表无过滤查询| APPR{{"interrupt：人工审批"}}
+    APPR -->|approved 后执行| EX
+    EX -->|SQL 报错：错误回灌自愈| SG
+    EX -->|重试耗尽| FAIL([END：failed])
+    EX -->|查询成功| IW["insight_writer<br/>结论 + 图表 + 预签名URL"]
+    IW --> OK([END：done])
+
+    style CLAR fill:#fff3cd,stroke:#d4a017
+    style APPR fill:#fff3cd,stroke:#d4a017
+    style SG fill:#d4edda,stroke:#2e7d32
+    style FAIL fill:#f8d7da,stroke:#b02a37
+```
+
+三条控制流对应代码位置：澄清/审批是节点内 interrupt()（框架原语，
+PostgreSQL checkpointer 持久化暂停态）；自愈是 executor 的条件边回
+sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬时故障）。
+
 ## 3. 一次问数的完整旅程（数据流）
 
 以"上个月各渠道的实付销售额是多少"为例：
@@ -147,6 +173,7 @@
 | 业务查询延迟 | 聚合查询端到端 39ms（含七道闸+只读事务） | `scripts/smoke_tools.py` |
 | 攻击拦截 | 多语句注入 / pg_sleep / 未授权表（eval.queries）均被拒并记录 WARNING 日志 | smoke 测试输出 |
 - 密钥：`.env` 永不提交；`.env.example` 只有占位符
+- D7 复核（2026-09-29）：以上数字全部用 `--verify` 重跑复现，逐项一致（含 19,323/1,262 = 15.3 倍尖峰、Top100 1.2%、69 单上限）
 
 ## 10. D2 实测数据（状态机 + API 的证据链）
 
@@ -182,7 +209,7 @@
 | 无答案拒答（mock） | **unanswerable 10/10 = 100%**（幻觉列/幻觉表连拦 3 次 → failed → 拒答，而非编造答案） | mock 模拟"幻觉型 LLM"硬写 schema 没有的列 |
 | 歧义澄清（mock） | ambiguous 1/10（mock 的 Curator 是规则模型，只认"销售额"一种歧义） | 真实模型的歧义识别能力待 key 到位验证 |
 | 执行类（mock） | 1/90（mock 对多数问题返回固定回退 SQL，与金标不一致属预期） | 同上 |
-| P95 延迟 | 62ms（mock；checkpointer 池化 + 逐行写入优化后，原 928ms） | runner 计时 |
+| P95 延迟 | 60ms（mock；checkpointer 池化 + 逐行写入优化后，原 928ms；2026-09-29 复测 60ms） | runner 计时 |
 | 评测结果落库 | 每轮写入 `eval.runs`（git_commit / prompt_version / model / accuracy / P95 / 成本），报告落 `reports/` | runner |
 
 ### 压测与性能优化（D3）
@@ -195,6 +222,8 @@
 | 5 | 1.9 | **13.8** | — | **241ms** | 353ms |
 | 10 | 1.9 | **18.2** | 4,924ms | **300ms** | 469ms |
 | 20 | 1.9 | **17.7** | 9,856ms | **698ms** | 846ms |
+
+D7 复核（2026-09-29）：并发 10 复跑两次 QPS 22.3/22.8、P50 280/300ms、P95 376/393ms——不低于表中记录（表中为保守值）；并发 20 复跑 QPS 19.3、P50 668ms（P95 受当时机器负载影响波动到 1299ms，负载干净时与表中一致）。
 
 优化前 QPS 恒定 1.9、延迟随并发线性劣化——系统实际只服务一个请求。逐级定位出三级瓶颈（全部有孤立实验数据）：
 
