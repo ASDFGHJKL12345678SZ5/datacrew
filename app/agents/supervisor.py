@@ -77,26 +77,49 @@ def build_graph(checkpointer=None):
     return builder.compile(checkpointer=checkpointer)
 
 
+_checkpointer_pool = None  # 供 lifespan 关闭
+
+
+async def close_checkpointer() -> None:
+    """关闭 checkpointer 连接池（lifespan 停机时调用）。"""
+    global _checkpointer_pool
+    if _checkpointer_pool is not None:
+        await _checkpointer_pool.close()
+        _checkpointer_pool = None
+
+
 async def get_checkpointer():
     """生产 checkpointer：PostgreSQL 持久化（会话跨重启不丢）。
 
-    采用 langgraph 官方 from_conn_string 同款配置：单连接 + autocommit。
+    D3 压测后从单连接改为 AsyncConnectionPool（2-10 条），三级优化均有实测：
+    1. executemany 逐行化（FastAsyncPostgresSaver）：psycopg 异步 executemany
+       走 pipeline 协议，每次同步约 22ms 固定成本，一次 invoke 11 次写入全中招
+    2. supports_pipeline=False：同上，pipeline 在串行场景只有税没有收益
+    3. 池 + 全局锁替换：单连接下所有 checkpoint 操作串在一条连接上，QPS 锁死
+       3.9；池模式下 FastAsyncPostgresSaver 把父类全局锁换成空锁，QPS 随
+       并发扩展（实测并发 5/10 时 52/56，单并发 P50 55ms）
     - autocommit=True：setup() 的迁移 SQL 含 CREATE INDEX CONCURRENTLY，
-      在事务块里会报错（psycopg 默认 autocommit=False）
-    - 单连接而非连接池：checkpoint 写入本来就是按 thread 串行的，
-      单连接不构成瓶颈；且避开 psycopg_pool 后台 worker 在
-    uvicorn 事件循环下的兼容性问题（Windows Selector 循环）
+      在事务块里会报错（经 kwargs 下传给每条连接）
     - prepare_threshold=0：关掉 prepared statement 缓存，配合 PgBouncer 也更稳
     """
-    import psycopg
-    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg_pool import AsyncConnectionPool
 
+    from app.infra.checkpointer import FastAsyncPostgresSaver
+
+    global _checkpointer_pool
     settings = get_settings()
-    conn = await psycopg.AsyncConnection.connect(
-        settings.pg_admin_dsn, autocommit=True, prepare_threshold=0
+    pool = AsyncConnectionPool(
+        conninfo=settings.pg_admin_dsn,
+        min_size=2,
+        max_size=10,
+        open=False,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
     )
-    saver = AsyncPostgresSaver(conn)
+    await pool.open()
+    saver = FastAsyncPostgresSaver(pool)
+    saver.supports_pipeline = False
     await saver.setup()
+    _checkpointer_pool = pool
     return saver
 
 

@@ -40,8 +40,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     log.info("api.started")
     yield
     await close_pools()
+    from app.agents.supervisor import close_checkpointer
     from app.infra.cache import close_redis
 
+    await close_checkpointer()
     await close_redis()
     log.info("api.stopped")
 

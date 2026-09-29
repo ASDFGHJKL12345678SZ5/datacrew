@@ -1,0 +1,26 @@
+D3: checkpointer 性能修正 + 压测工具链（QPS 1.9→18，P95 928ms→62ms）
+
+压测暴露三级瓶颈，逐级定位修复（全部有孤立实验数据）：
+
+1. psycopg 异步 pipeline 的 22ms 固定税：空 pipeline 进出 22ms、
+   pipeline+1 查询 44ms vs 同连接裸 execute 0.53ms。串行场景下
+   pipeline 只有税没有批送收益 → supports_pipeline=False（472→264ms）
+2. executemany 触发 pipeline：aput（dict/list 状态进 blobs 表）和
+   aput_writes 都用 cur.executemany，每次调用 44ms，一次 invoke 的
+   11 次写入全中招 → FastAsyncPostgresSaver 代理 cursor 逐行 execute
+   （语义等价：每行本是独立 INSERT），264→60ms
+3. checkpointer 全局锁：_cursor 开头 async with self.lock 串行化所有
+   checkpoint 操作，连接池也救不了 → 池模式自动替换为空锁（池每次
+   _cursor 取独立连接，锁只剩串行化副作用），QPS 锁死 4 → 随并发扩展到 18
+
+压测（scripts/load_test.py，httpx SSE，20 key 轮询绕限流）：
+- 并发 1/10/20：QPS 1.9/1.9/1.9 → 4.1/18.2/17.7
+- P50：496/4924/9856ms → 216/300/698ms；P95（并发20）846ms
+- 成功率 100%，传输层/业务层失败分开计数
+- 全量评测复跑：22/120 不变（诚实 mock 基线），P95 928→62ms
+
+其他：
+- get_checkpointer 改 AsyncConnectionPool（2-10 条），lifespan 关闭
+- README：压测章节 + 4 个深挖点 + D2 ADR 修订（单连接结论被推翻）
+- tests/test_checkpointer.py：executemany 逐行化 / 池模式去锁 / 单连接保留锁
+- 测试 40→44 全过，ruff 干净

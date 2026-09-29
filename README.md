@@ -104,7 +104,7 @@
 |---|---|---|
 | D1 ✅ | 基础设施 + mock 数据 + MCP 工具层（七道闸） | 单 Agent 问数跑通；安全闸单测全过（28/28）；MCP 客户端联通验证通过 |
 | D2 ✅ | 四 Agent + Supervisor 状态机 + 澄清/自愈/人工审批 + SSE API | 33/33 测试通过（5 条控制流集成测试）；API 冒烟全过（鉴权/澄清恢复/审批恢复/LIMIT 兜底）；checkpointer 落 PG 实测读回 |
-| D3 ✅ | 120 条评测集 + 跑分调优 + 压测 + Streamlit demo + Compose | 评测集 120 条七类；mock 下安全类 20/20；P95 928ms |
+| D3 ✅ | 120 条评测集 + 跑分调优 + 压测 + Streamlit demo + Compose | 评测集 120 条七类；mock 下安全类 20/20；P95 928ms；压测 QPS 1.9→18（并发 10）、P50 4.9s→300ms |
 | D4-D6 | （项目二 FinRAG，独立仓库） | — |
 | D7 | 两个项目收尾：CI、README、架构图、简历定稿、数字人工核验 | 每个简历数字能说出去源 |
 
@@ -118,7 +118,7 @@
 - **为什么 eval schema 不给 Agent 的 DB 角色授权**：gold_sql 是标准答案，可读即可作弊。权限设计本身就是安全叙事。
 - **为什么 LLM 走 OpenAI 兼容协议**：DeepSeek/Qwen/本地 vLLM 一套客户端，换模型只改 `.env`；provider 适配器让"换模型"成为一次配置变更而非一次重构。
 - **D2：为什么 Windows 开发环境要自定义事件循环工厂**：uvicorn 在 Windows 上强制 ProactorEventLoop（为子进程 worker 设计），而 psycopg 异步模式（langgraph checkpointer 的依赖）在 Proactor 下直接报错。本服务无子进程 worker 需求，通过 `uvicorn.run(loop="app.loops:selector_loop_factory")` 注入 Selector 循环工厂。**踩坑记录：自定义工厂被 asyncio.Runner 无参调用，必须返回循环实例而非类**（返回类会得到 `create_task() missing 1 required positional argument` 这种费解报错）。
-- **D2：为什么 checkpointer 用单连接而不是连接池**：langgraph 官方 `from_conn_string` 同款配置（单连接 + autocommit）。autocommit 是硬要求——setup() 的迁移 SQL 含 `CREATE INDEX CONCURRENTLY`，在事务块里直接报错；且 psycopg_pool 的后台 worker 在 uvicorn 循环下建连不稳定。checkpoint 写入按 thread 串行，单连接不构成瓶颈。
+- **D2（D3 已修订）：checkpointer 从单连接改为连接池（2-10 条）+ 池模式去全局锁**：初版单连接的理由是“checkpoint 写入按 thread 串行、单连接不构成瓶颈，且 psycopg_pool 后台 worker 在 uvicorn 循环下建连不稳定”。D3 压测推翻了这个判断——单连接下所有 checkpoint 操作串在一条连接上，QPS 锁死 3.9、并发 20 时 P50 4.7s。改为 AsyncConnectionPool 后兼容问题没有复现（根因是当时的 Proactor 循环，现已全局 Selector），实测 QPS 随并发扩展到 18。autocommit=True 仍是硬要求（setup() 含 CREATE INDEX CONCURRENTLY），经 kwargs 下传给每条连接。
 - **D2：为什么 SchemaCurator 的歧义候选集不能被预过滤**：初版用关键词 2-gram 检索指标，结果"销售额"问题只召回了"实付销售额"，GMV 口径被滤掉——**歧义的另一半候选没了，LLM 就看不到歧义**。修正为口径注册表全量注入（歧义判断需要全部候选在场），2-gram 只用于排序；表清单才按需过滤。检索可以排序，不能把候选滤空。
 - **D3：为什么结果集哈希要双排序 + 数值格式化**：金标 SQL 与 Agent SQL 的列顺序、ORDER BY 不保证一致，1.5 与 1.50 也是同一答案。行内值排序 + 行排序 + 2 位小数，把"表示差异"从"语义差异"里剥出来，否则评测会系统性冤枉正确答案。
 - **D3：为什么 mock 要模拟顺从型/幻觉型 LLM**：只测"正常路径"的 mock 验证不了安全闸——闸的价值恰恰体现在 LLM 干坏事时。mock 按危险意图照单全写、按幻觉维度硬写不存在的列，让 CI 无 Key 也能端到端验证 10 类攻击全部被拦。
@@ -154,7 +154,7 @@
 
 | 指标 | 实测值 | 来源 / 复现方式 |
 |---|---|---|
-| 测试总量 | 40/40 通过（28 安全闸 + 7 控制流集成 + 5 评测哈希不变量） | `pytest tests/` |
+| 测试总量 | 44/44 通过（28 安全闸 + 7 控制流集成 + 5 评测哈希不变量） | `pytest tests/` |
 | 控制流覆盖 | 澄清中断恢复 / SQL 自愈 / 审批批准 / 审批优雅拒绝 / 无歧义直达 五条全过 | `tests/test_state_machine.py` |
 | 自愈行为 | 错误列名 sale_amount → 回灌 schema → 改用 pay_amount，1 次重试成功（3 渠道 3 行真实数据） | 集成测试 + API 冒烟 |
 | 审批兜底 | 批准大表扫描后自动 LIMIT 1000（审批语义是"允许扫表"不是"允许灌爆上下文"） | API 冒烟第 4 步 |
@@ -182,8 +182,33 @@
 | 无答案拒答（mock） | **unanswerable 10/10 = 100%**（幻觉列/幻觉表连拦 3 次 → failed → 拒答，而非编造答案） | mock 模拟"幻觉型 LLM"硬写 schema 没有的列 |
 | 歧义澄清（mock） | ambiguous 1/10（mock 的 Curator 是规则模型，只认"销售额"一种歧义） | 真实模型的歧义识别能力待 key 到位验证 |
 | 执行类（mock） | 1/90（mock 对多数问题返回固定回退 SQL，与金标不一致属预期） | 同上 |
-| P95 延迟 | 928ms（mock；主要花在自愈重试的 3 次 LLM 往返） | runner 计时 |
+| P95 延迟 | 62ms（mock；checkpointer 池化 + 逐行写入优化后，原 928ms） | runner 计时 |
 | 评测结果落库 | 每轮写入 `eval.runs`（git_commit / prompt_version / model / accuracy / P95 / 成本），报告落 `reports/` | runner |
+
+### 压测与性能优化（D3）
+
+`scripts/load_test.py`（httpx SSE 流式，20 个 dev-key 轮询绕限流，传输层/业务层失败分开计数）。优化前后对照：
+
+| 并发 | QPS（优化前） | QPS（优化后） | P50（前） | P50（后） | P95（后） |
+|---|---|---|---|---|---|
+| 1 | 1.9 | **4.1** | 496ms | **216ms** | 228ms |
+| 5 | 1.9 | **13.8** | — | **241ms** | 353ms |
+| 10 | 1.9 | **18.2** | 4,924ms | **300ms** | 469ms |
+| 20 | 1.9 | **17.7** | 9,856ms | **698ms** | 846ms |
+
+优化前 QPS 恒定 1.9、延迟随并发线性劣化——系统实际只服务一个请求。逐级定位出三级瓶颈（全部有孤立实验数据）：
+
+1. **psycopg 异步 pipeline 的 22ms 固定税**：langgraph checkpointer 默认走 `conn.pipeline()`。实测本机（Windows + Docker Desktop PG）空 pipeline 进出 22ms、pipeline+1 查询 44ms，而同连接裸 execute 0.53ms。串行场景下 pipeline 只有税没有批送收益 → `supports_pipeline = False`（472ms → 264ms）
+2. **`executemany` 触发 pipeline**：`aput`（状态里的 dict/list 进 blobs 表）和 `aput_writes` 都用 `cur.executemany`，psycopg 异步 executemany 内部走 pipeline 协议，每次调用 44ms（有无事务都一样）。一次 invoke 触发 11 次写入全中招 → `FastAsyncPostgresSaver` 代理 cursor 逐行 execute（语义等价：每行本就是我独立 INSERT），264ms → 60ms
+3. **checkpointer 全局锁**：`_cursor` 开头 `async with self.lock` 把所有 checkpoint 操作串行化，连接池也救不了（实测池不加锁修改 QPS 仍 4）。池模式下每次 `_cursor` 从池取独立连接，锁是多余的 → 池模式自动替换为空锁。**QPS 从锁死 4 扩展到 18（4.5 倍）**
+
+对比基线：内存 checkpointer 44ms vs PG 连接池 60ms——持久化只多 16ms。当前吞吐上限约 18 QPS（mock 模式，瓶颈在 mock LLM 与 RO 连接池），生产换真实模型后需重新标定。
+
+面试深挖点（D3 压测）：
+1. **怎么证明慢在数据库而不是 LLM**：内存 checkpointer 44ms vs PG 472ms 的对照实验先把范围锁到 checkpointer；cProfile 里 454ms 花在 `select.select()` 而 psycopg 自身 wait 仅 12ms，说明时间花在"等 socket"而不是"算"
+2. **为什么逐行 execute 比 executemany 快**：executemany 的批送优势要靠 pipeline 协议实现，而 psycopg 异步 pipeline 在本机每次同步有 22ms 固定成本；checkpoint 写入一次只有个位数行，逐行 N 次 1.3ms 往返反而更便宜。**"批量 API 更快"是有前提的**——前提不成立时更慢
+3. **为什么连接池还不够、必须去锁**：池解决"连接不够用"，锁解决"操作不许并行"。langgraph 的锁是为单连接安全设计的（psycopg 连接不能被并发使用），池模式下每次 `_cursor` 拿到独立连接，锁只剩串行化副作用——**锁的语义在架构变化后会变成性能陷阱**
+4. **压测数字为什么标注 mock**：mock LLM 不经网络，测的是框架与存储层的真实开销；真实模型的延迟与吞吐需要 key 到位后重新标定，数字不能混用
 
 面试深挖点（D3）：
 1. **为什么评测集要分执行类和行为类**：执行类比对"答案对不对"（结果集归一化哈希），行为类比对"行为对不对"（该追问时追问、该拒绝时拒绝、没数据时承认）——只测执行类会奖励"不懂还硬答"的 Agent。
