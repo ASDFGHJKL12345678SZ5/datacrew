@@ -1,0 +1,61 @@
+# CI：lint + 全量测试（含 postgres/redis 服务，无需 API Key）
+#
+# 设计说明：
+# - PG 服务用 deploy/postgres/init 下的同一套 SQL 初始化——CI 与本地 docker
+#   compose 跑的是同一份 schema/role 定义，不会出现"本地过 CI 挂"
+# - mock 数据用 --scale 0.1（5k 用户/50k 订单）：测试只验证查询语义，
+#   不需要 200w 行的量级，换取 CI 分钟数
+# - LLM_MODE=mock：规则假模型，控制流（澄清/自愈/审批）用 mock 可全覆盖
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ecommerce
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -e ".[dev]"
+
+      - name: 初始化数据库（CI 与本地同一套 SQL）
+        run: |
+          for f in deploy/postgres/init/*.sql; do
+            PGPASSWORD=postgres psql -h localhost -U postgres -d ecommerce -f "$f"
+          done
+
+      - name: 生成 mock 数据（1/10 规模）
+        run: python scripts/generate_mock_data.py --scale 0.1
+
+      - name: ruff
+        run: ruff check app eval scripts
+
+      - name: pytest
+        run: python -m pytest tests/ -q
