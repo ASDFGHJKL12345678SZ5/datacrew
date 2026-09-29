@@ -104,8 +104,7 @@
 |---|---|---|
 | D1 ✅ | 基础设施 + mock 数据 + MCP 工具层（七道闸） | 单 Agent 问数跑通；安全闸单测全过（28/28）；MCP 客户端联通验证通过 |
 | D2 ✅ | 四 Agent + Supervisor 状态机 + 澄清/自愈/人工审批 + SSE API | 33/33 测试通过（5 条控制流集成测试）；API 冒烟全过（鉴权/澄清恢复/审批恢复/LIMIT 兜底）；checkpointer 落 PG 实测读回 |
-| D3 | 120 条评测集 + 跑分调优 + 压测 + Streamlit demo + Compose | accuracy/P95/QPS 有数字；demo 可演示全流程 |
-| D3 | 120 条评测集 + 跑分调优 + 压测 + Streamlit demo + Compose | accuracy/P95/QPS 有数字；demo 可演示全流程 |
+| D3 ✅ | 120 条评测集 + 跑分调优 + 压测 + Streamlit demo + Compose | 评测集 120 条七类；mock 下安全类 20/20；P95 928ms |
 | D4-D6 | （项目二 FinRAG，独立仓库） | — |
 | D7 | 两个项目收尾：CI、README、架构图、简历定稿、数字人工核验 | 每个简历数字能说出去源 |
 
@@ -121,6 +120,9 @@
 - **D2：为什么 Windows 开发环境要自定义事件循环工厂**：uvicorn 在 Windows 上强制 ProactorEventLoop（为子进程 worker 设计），而 psycopg 异步模式（langgraph checkpointer 的依赖）在 Proactor 下直接报错。本服务无子进程 worker 需求，通过 `uvicorn.run(loop="app.loops:selector_loop_factory")` 注入 Selector 循环工厂。**踩坑记录：自定义工厂被 asyncio.Runner 无参调用，必须返回循环实例而非类**（返回类会得到 `create_task() missing 1 required positional argument` 这种费解报错）。
 - **D2：为什么 checkpointer 用单连接而不是连接池**：langgraph 官方 `from_conn_string` 同款配置（单连接 + autocommit）。autocommit 是硬要求——setup() 的迁移 SQL 含 `CREATE INDEX CONCURRENTLY`，在事务块里直接报错；且 psycopg_pool 的后台 worker 在 uvicorn 循环下建连不稳定。checkpoint 写入按 thread 串行，单连接不构成瓶颈。
 - **D2：为什么 SchemaCurator 的歧义候选集不能被预过滤**：初版用关键词 2-gram 检索指标，结果"销售额"问题只召回了"实付销售额"，GMV 口径被滤掉——**歧义的另一半候选没了，LLM 就看不到歧义**。修正为口径注册表全量注入（歧义判断需要全部候选在场），2-gram 只用于排序；表清单才按需过滤。检索可以排序，不能把候选滤空。
+- **D3：为什么结果集哈希要双排序 + 数值格式化**：金标 SQL 与 Agent SQL 的列顺序、ORDER BY 不保证一致，1.5 与 1.50 也是同一答案。行内值排序 + 行排序 + 2 位小数，把"表示差异"从"语义差异"里剥出来，否则评测会系统性冤枉正确答案。
+- **D3：为什么 mock 要模拟顺从型/幻觉型 LLM**：只测"正常路径"的 mock 验证不了安全闸——闸的价值恰恰体现在 LLM 干坏事时。mock 按危险意图照单全写、按幻觉维度硬写不存在的列，让 CI 无 Key 也能端到端验证 10 类攻击全部被拦。
+- **D3：为什么评测集构建要把金标 SQL 跑一遍才入库**：金标自己跑不通（语法错、口径错、除零）的评测集比没有更糟——它会冤枉 Agent。构建脚本把"金标执行失败"当构建失败处理，90 条执行类金标全部实测通过才落库。
 - **D2：为什么 astream(updates) 的中断 chunk 不能直接当节点更新用**：langgraph 1.x 中断时产出 `{'__interrupt__': (Interrupt(...),)}`——值是 tuple，且中断点没有完整节点更新。中断事件统一从 `aget_state()` 的 `task.interrupts` 读取，`_node_events` 跳过该键。这是读源码确认的，文档没写。
 
 ## 8. 安全设计速查
@@ -152,7 +154,7 @@
 
 | 指标 | 实测值 | 来源 / 复现方式 |
 |---|---|---|
-| 测试总量 | 33/33 通过（28 安全闸 + 5 控制流集成） | `pytest tests/` |
+| 测试总量 | 40/40 通过（28 安全闸 + 7 控制流集成 + 5 评测哈希不变量） | `pytest tests/` |
 | 控制流覆盖 | 澄清中断恢复 / SQL 自愈 / 审批批准 / 审批优雅拒绝 / 无歧义直达 五条全过 | `tests/test_state_machine.py` |
 | 自愈行为 | 错误列名 sale_amount → 回灌 schema → 改用 pay_amount，1 次重试成功（3 渠道 3 行真实数据） | 集成测试 + API 冒烟 |
 | 审批兜底 | 批准大表扫描后自动 LIMIT 1000（审批语义是"允许扫表"不是"允许灌爆上下文"） | API 冒烟第 4 步 |
@@ -167,3 +169,24 @@
 2. **自愈的重试上限怎么防死循环**：MAX_RETRIES=3 + retry_count 单调递增 + failed 终态，条件边只认 last_error 存在与否。
 3. **为什么 Mock LLM 值得写**：核心编排逻辑不依赖外部服务才能测试，CI 每次提交都能跑完整状态机回归——这是"Agent 逻辑可测"的工程化，不是玩具。
 4. **审批的 LIMIT 包裹**：批准的是"允许扫表"，不是"允许把 50 万行灌进上下文"——审批粒度和资源边界是两件事。
+
+## 11. D3 实测数据（评测闭环的证据链）
+
+> LLM_MODE=mock 下实测（CI 无 API Key 可复现）。**mock 不是 text-to-SQL 模型，执行类低分是预期内的诚实结果**——mock 的职责是验证评测流水线本身与安全闸的端到端行为，真实 accuracy 待 DeepSeek key 到位后跑同一套评测集。
+
+| 指标 | 实测值 | 来源 / 复现方式 |
+|---|---|---|
+| 评测集规模 | 120 条 / 7 类：simple_agg 35、multi_join 25、time_range 15、metric_def 15、ambiguous 10、should_refuse 10、unanswerable 10 | `eval/build_eval_set.py`，金标 SQL 逐条执行验证后才入库（跑不通即构建失败） |
+| 全量跑分（mock） | 22/120 = 18.3% | `python eval/runner.py`，结果落 `eval.runs` + `reports/*.md` |
+| 危险拦截（mock） | **should_refuse 10/10 = 100%**（DELETE/UPDATE/DROP/TRUNCATE/越权读 eval schema/禁 SELECT 星号/pg_sleep/多语句/information_schema/深层嵌套） | mock 模拟"顺从型 LLM"照单全写，闸逐个拦截 |
+| 无答案拒答（mock） | **unanswerable 10/10 = 100%**（幻觉列/幻觉表连拦 3 次 → failed → 拒答，而非编造答案） | mock 模拟"幻觉型 LLM"硬写 schema 没有的列 |
+| 歧义澄清（mock） | ambiguous 1/10（mock 的 Curator 是规则模型，只认"销售额"一种歧义） | 真实模型的歧义识别能力待 key 到位验证 |
+| 执行类（mock） | 1/90（mock 对多数问题返回固定回退 SQL，与金标不一致属预期） | 同上 |
+| P95 延迟 | 928ms（mock；主要花在自愈重试的 3 次 LLM 往返） | runner 计时 |
+| 评测结果落库 | 每轮写入 `eval.runs`（git_commit / prompt_version / model / accuracy / P95 / 成本），报告落 `reports/` | runner |
+
+面试深挖点（D3）：
+1. **为什么评测集要分执行类和行为类**：执行类比对"答案对不对"（结果集归一化哈希），行为类比对"行为对不对"（该追问时追问、该拒绝时拒绝、没数据时承认）——只测执行类会奖励"不懂还硬答"的 Agent。
+2. **结果集哈希为什么排序两次**：行内值排序 + 行排序，吸收金标与 Agent SQL 的列顺序/ORDER BY 差异；数值统一 2 位小数吸收 1.5 vs 1.50。不这么做，"对不上"会是归一化差异而不是答案错误——这是评测系统最常见的事故。
+3. **为什么 mock 要模拟"屡教不改的 LLM"**：安全闸的价值不依赖 LLM 变聪明。mock 在自愈时原样重提危险/幻觉 SQL，连试 3 次全被拦、最终 failed——证明拦截是结构性的（每次执行前过闸），不是提示词求情求来的。
+4. **gold_sql 为什么不能让 Agent 读到**：`eval.queries` 存标准答案，可读即可作弊。DB 角色不授权 eval schema，从权限设计上断绝作弊路径——评测的信任根在数据库权限，不在代码自觉。

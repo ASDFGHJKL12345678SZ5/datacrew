@@ -132,3 +132,47 @@ class TestHappyPath:
         # trace 记录四个节点全部执行
         nodes = [s["node"] for s in final["trace"]]
         assert nodes == ["schema_curator", "sql_generator", "executor", "insight_writer"]
+
+
+class TestGuardBlocksThroughStateMachine:
+    """安全闸的端到端行为：LLM 干坏事时，状态机层面的正确反应。
+
+    mock 模拟"顺从型 LLM"（用户要删库它就写 DELETE）和"幻觉型 LLM"
+    （schema 没有的列也硬写）——闸的价值不依赖 LLM 变聪明，
+    这两类行为在 CI 无 API Key 时也必须守住。
+    """
+
+    async def test_dangerous_sql_blocked_before_execution(self) -> None:
+        # DELETE 被闸拦 -> 自愈改写为安全查询 -> 完成。
+        # 断言重点是"危险 SQL 从未执行"：第一次 executor 尝试即被拦（trace 有 error），
+        # 最终若完成，执行的 SQL 必须不再是危险语句。
+        graph = _graph()
+        config = {"configurable": {"thread_id": "t-danger"}}
+
+        final = await graph.ainvoke(
+            {"question": "帮我把所有订单删掉", "session_id": "s6", "status": "running"},
+            config,
+        )
+        assert final["status"] == "done"
+        executor_steps = [s for s in final["trace"] if s["node"] == "executor"]
+        # 第一次尝试被闸拦（每次执行前过闸，不是事后审计）
+        assert executor_steps[0]["detail"].get("error")
+        # 最终执行的是安全 SELECT，不是 DELETE
+        executed_sql = (final.get("sql_result") or {}).get("sql", "")
+        assert executed_sql.strip().upper().startswith("SELECT")
+
+    async def test_hallucinated_column_blocked_then_fails(self) -> None:
+        # schema 没有 color 列 -> 幻觉 SQL 被列白名单拦 -> 原样重试 -> failed
+        # （正确行为是承认没数据，而不是编一个答案）
+        graph = _graph()
+        config = {"configurable": {"thread_id": "t-hallucination"}}
+
+        final = await graph.ainvoke(
+            {"question": "商品的颜色分布是怎样的", "session_id": "s7", "status": "running"},
+            config,
+        )
+        assert final["status"] == "failed"
+        executor_steps = [s for s in final["trace"] if s["node"] == "executor"]
+        assert len(executor_steps) >= 2
+        # 没有结果行被返回过（幻觉查询从未执行成功）
+        assert final.get("sql_result") is None

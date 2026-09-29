@@ -50,6 +50,7 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 # 数据脚本：长 SQL 字符串与中文常量折行反而损害可读性，豁免行宽
 "scripts/*" = ["E501"]
+"eval/*" = ["E501"]  # 金标 SQL 是长数据字面量，不可换行
 
 [tool.mypy]
 python_version = "3.11"
