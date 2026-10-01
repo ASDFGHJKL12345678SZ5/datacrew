@@ -51,7 +51,8 @@ jobs:
       - name: 初始化数据库（CI 与本地同一套 SQL）
         run: |
           for f in deploy/postgres/init/*.sql; do
-            PGPASSWORD=postgres psql -h localhost -U postgres -d ecommerce -f "$f"
+            PGPASSWORD=postgres psql -h localhost -U postgres -d ecommerce \
+              -v ON_ERROR_STOP=1 -f "$f"
           done
 
       - name: 生成 mock 数据（1/10 规模）

@@ -64,7 +64,7 @@ async def test_stored_gold_hash_matches_fresh_computation() -> None:
     # 归一化逻辑改版后若忘了重建评测集，所有执行类会静默全挂——这条测试守住它。
     async with admin_pool().acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT gold_sql, result_hash FROM eval.queries WHERE id = 1"
+            "SELECT gold_sql, result_hash FROM eval.queries ORDER BY id LIMIT 1"
         )
         assert row is not None, "eval.queries 为空——先跑 eval/build_eval_set.py"
         fresh = hash_rows(await conn.fetch(row["gold_sql"]))
