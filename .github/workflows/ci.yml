@@ -57,6 +57,12 @@ jobs:
       - name: 生成 mock 数据（1/10 规模）
         run: python scripts/generate_mock_data.py --scale 0.1
 
+      # 评测集入库：金标 SQL 逐条执行验证（跑不通即构建失败 = 评测质量门禁），
+      # result_hash 按当前数据现算。缺这一步 eval.queries 为空，
+      # test_eval_hash 的"库内金标=现算"回归测试必挂（push 后 CI 实测红过）。
+      - name: 构建评测集（金标 SQL 验证 + 哈希入库）
+        run: python eval/build_eval_set.py
+
       - name: ruff
         run: ruff check app eval scripts
 
