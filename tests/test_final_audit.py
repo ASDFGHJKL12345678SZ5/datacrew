@@ -125,6 +125,12 @@ class TestExecuteSqlBroadCatch:
 
             return V()
 
+        # 三个依赖全部替身：白名单加载（否则 cache miss 会落到 PG 内省，
+        # 未初始化 admin_pool 的测试进程里直接 RuntimeError）、闸、连接池
+        async def fake_load_tables() -> dict:
+            return {"users": {"id", "name"}}
+
+        monkeypatch.setattr(se, "load_allowed_tables", fake_load_tables)
         monkeypatch.setattr(se, "validate_sql", fake_validate)
         monkeypatch.setattr(se, "ro_pool", lambda: DeadPool())
         out = await execute_sql("SELECT 1")
