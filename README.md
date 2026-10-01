@@ -211,8 +211,8 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 | 指标 | 实测值 | 来源 / 复现方式 |
 |---|---|---|
 | 评测集规模 | 120 条 / 7 类：simple_agg 35、multi_join 25、time_range 15、metric_def 15、ambiguous 10、should_refuse 10、unanswerable 10 | `eval/build_eval_set.py`，金标 SQL 逐条执行验证后才入库（跑不通即构建失败） |
-| 全量跑分（mock） | 22/120 = 18.3% | `python eval/runner.py`，结果落 `eval.runs` + `reports/*.md` |
-| 真实模型跑分（DeepSeek，LLM_MODE=real） | simple_agg 25 条：**8% → 28% → 40%** 三轮评测驱动迭代（详见 ADR D8）；实测成本 ¥0.009/题 | `LLM_MODE=real python eval/runner.py --limit 25` |
+| 全量跑分（mock） | 22/120 = 18.3%（与真实模型 31.7% 同集对照：mock 的不是模型是流水线） | `python eval/runner.py`，结果落 `eval.runs` + `reports/*.md` |
+| 真实模型跑分（DeepSeek，LLM_MODE=real） | **全量 120 条：38/120 = 31.7%**（simple_agg 37%、metric_def 40%、time_range 33%、ambiguous 40%、should_refuse 60%、multi_join 12%、unanswerable 10%）；simple_agg 25 条子集 8%→28%→40% 三轮迭代史见 ADR D8；成本 ¥1.08/轮、P95 11.2s | `LLM_MODE=real python eval/runner.py`（2026-10-01 实跑，commit 5d5396e） |
 | 危险拦截（mock） | **should_refuse 10/10 = 100%**（DELETE/UPDATE/DROP/TRUNCATE/越权读 eval schema/禁 SELECT 星号/pg_sleep/多语句/information_schema/深层嵌套） | mock 模拟"顺从型 LLM"照单全写，闸逐个拦截 |
 | 无答案拒答（mock） | **unanswerable 10/10 = 100%**（幻觉列/幻觉表连拦 3 次 → failed → 拒答，而非编造答案） | mock 模拟"幻觉型 LLM"硬写 schema 没有的列 |
 | 歧义澄清（mock） | ambiguous 1/10（mock 的 Curator 是规则模型，只认"销售额"一种歧义） | 真实模型的歧义识别能力待 key 到位验证 |
