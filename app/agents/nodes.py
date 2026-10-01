@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import datetime as _dt
+import json
 import time
 from typing import Any
 
@@ -25,6 +27,7 @@ from app.agents.prompts import (
 )
 from app.agents.state import AgentState
 from app.core.logging import get_logger
+from app.infra.db import admin_pool  # noqa: TID252  数据截止日查询
 from app.tools.chart_gen import generate_chart
 from app.tools.schema_search import search_schema
 from app.tools.sql_execute import execute_sql
@@ -52,6 +55,27 @@ def _fmt_schema_context(schema_context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _today_cn() -> str:
+    """当前日期的中文可读形式（如 "2026-10-01 星期四"）——注入 LLM 推算相对时间。"""
+    now = _dt.datetime.now()
+    return now.strftime("%Y-%m-%d 星期") + "一二三四五六日"[now.weekday()]
+
+
+async def _data_as_of() -> str:
+    """数据截止日 = orders.max(created_at) 的日期。
+
+    真实评测事故："昨天有多少订单"模型按系统今天推算，金标按数据截止日推算，
+    两者差 3 天直接判错。BI 系统的正确口径就是按数据截止日解释相对时间，
+    系统今天只回答"现在几点"这类问题。查询只读、索引友好。
+    """
+    try:
+        async with admin_pool().acquire() as conn:
+            return str(await conn.fetchval("SELECT max(created_at)::date FROM biz.orders"))
+    except Exception as e:  # 降级：拿不到用系统今天，不阻塞主链路
+        log.warning("data_as_of.fallback", extra={"context": {"reason": str(e)[:100]}})
+        return _dt.date.today().isoformat()
+
+
 # ---------------------------------------------------------------- SchemaCurator
 async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     """检索相关表+指标口径；发现口径歧义时 interrupt 向用户追问。"""
@@ -65,8 +89,16 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     analysis_question = question
     if state.get("clarified_answer"):
         analysis_question = f"{question}（用户已明确：{state['clarified_answer']}）"
+    # 当前日期注入：相对时间（昨天/最近7天）必须可推算，否则真实模型会以
+    # "不知道今天几号"为由追问（真实评测 22/25 触发追问的事故之一）
+    today = _today_cn()
+    as_of = await _data_as_of()
     analysis = await chat_json([
-        {"role": "system", "content": SCHEMA_CURATOR_SYSTEM},
+        {"role": "system", "content": (
+            SCHEMA_CURATOR_SYSTEM
+            + f"\n当前日期：{today}"
+            + f"\n数据统计截止日：{as_of}（相对时间一律按它推算，不是系统今天）"
+        )},
         {
             "role": "user",
             "content": (
@@ -90,6 +122,7 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
             "schema_context": schema_context,
             "ambiguity": ambiguity,
             "clarified_answer": str(answer),
+            "data_as_of": as_of,
             "status": "running",
             "trace": [_step("schema_curator", started, clarified=True)],
         }
@@ -97,6 +130,7 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     return {
         "schema_context": schema_context,
         "ambiguity": ambiguity if ambiguity else None,
+        "data_as_of": as_of,
         "status": "running",
         "trace": [_step("schema_curator", started, tables=len(schema_context.get("tables", [])))],
     }
@@ -109,6 +143,14 @@ async def sql_generator_node(state: AgentState) -> dict[str, Any]:
     schema_ctx = _fmt_schema_context(state.get("schema_context", {}))
 
     system_prompt = render(SQL_GENERATOR_SYSTEM, schema_context=schema_ctx)
+    as_of = state.get("data_as_of") or ""
+    if as_of:
+        system_prompt += (
+            f"\n数据统计截止日：{as_of}。"
+            "昨天/最近N天/上个月等相对时间一律按数据截止日推算，"
+            f"（如昨天= {as_of} 前一天）。"
+            "问题没提时间范围时，WHERE 禁止出现任何时间条件——默认全量统计。"
+        )
     if state.get("last_error"):
         # 自愈模式：把执行错误回灌，让 LLM 修正
         prompt = render(
@@ -129,7 +171,15 @@ async def sql_generator_node(state: AgentState) -> dict[str, Any]:
             {"role": "user", "content": f"问题：{question}"},
         ]
 
-    result = await chat_json(messages)
+    try:
+        result = await chat_json(messages)
+    except json.JSONDecodeError:
+        # 真实模型偶发把 JSON 包在自然语言里或输出被截断（评测实测：
+        # "各城市的订单量排名" 23s 自愈失败于此）。立即原样重来一次，
+        # 追加硬约束——比走面向 SQL 错误的自愈回路更对症。
+        result = await chat_json(
+            messages + [{"role": "user", "content": "严格只输出一个 JSON 对象，不要任何其他文字"}]
+        )
     retry = state.get("retry_count", 0) + 1 if state.get("last_error") else 0
     return {
         "sql": result.get("sql", ""),

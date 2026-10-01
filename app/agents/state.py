@@ -44,6 +44,7 @@ class AgentState(TypedDict, total=False):
     # ---- SchemaCurator 产物 ----
     schema_context: dict[str, Any]     # {"tables": [...], "metrics": [...]}
     ambiguity: Ambiguity | None
+    data_as_of: str | None            # 数据截止日：相对时间的推算锚点（不是系统今天）
 
     # ---- SQLGenerator 产物 ----
     sql: str | None

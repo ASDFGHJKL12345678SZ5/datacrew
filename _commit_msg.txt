@@ -1,0 +1,21 @@
+fix(datacrew): MCP 工具真实化 + Langfuse 集成 + CI 镜像 + 评测集幂等
+
+P0 修复：
+- python_sandbox/chart_gen 从 stub 改为真实实现（沙箱四道边界+stdin DEVNULL
+  修复 MCP stdio 死等 / 纯 Python SVG 图表），InsightWriter 接线图表
+- Langfuse 集成（observability 适配层，无 key 静默降级，SDK 固定 v2）
+- CI 镜像 postgres:16 → pgvector/pgvector:pg16（对齐 init SQL）
+- README 测试数 44 → 84（28 安全闸+20 图表+10 沙箱+7 控制流+5 哈希+4
+  checkpointer+3 观测+7 MCP stdio 集成）
+
+P1 修复：
+- 分级路由打通：tier main/small，SchemaCurator 歧义检测走轻量模型
+- 压测 session_id 每请求唯一
+- /files 静态挂载；.env.example MinIO 键名对齐
+
+新发现并修复：
+- 子进程继承协议管道 stdin 导致 MCP server 内沙箱必超时（stdin=DEVNULL）
+- build_eval_set 改 (question, category) upsert，评测集不再分裂
+- eval.queries 加组合唯一约束（兼容跨类同题用例）
+
+测试：84/84 通过，ruff 零告警，mock 评测 22/120=18.3% 复现
