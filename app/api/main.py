@@ -17,8 +17,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.application.ask_service import ask, resume
 from app.core.config import get_settings
@@ -54,20 +53,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="DataCrew API", version="0.2.0", lifespan=lifespan)
 
-# /files 静态挂载：本地存储适配器产出的图表 URL（/files/charts/xxx.svg）
-# 需要它才能被浏览器/前端直接访问。MinIO 模式下由对象存储网关提供 URL，
-# 不挂本地目录（storage_backend=minio 时此处静默跳过）。
-try:
-    get_storage()  # 实例化即确保本地根目录存在
-    app.mount(
-        "/files",
-        StaticFiles(directory=get_settings().storage_local_root),
-        name="files",
-    )
-except Exception:
-    pass
-
-
 async def require_api_key(x_api_key: str = Header(default="")) -> str:
     """API Key 白名单鉴权。"""
     settings = get_settings()
@@ -86,6 +71,32 @@ async def rate_limit(api_key: str = Depends(require_api_key)) -> str:
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     return api_key
 
+
+# /files 本地存储文件服务（/files/charts/xxx.svg）。
+# 最终审查修复：早期用 StaticFiles.mount 裸挂——图表就是各次查询的真实业务
+# 数据，而图表 key 是毫秒时间戳可枚举，端口可达就能无鉴权拖全部历史图表。
+# 现在改成带 require_api_key 的路由，鉴权逻辑与 /ask 同一套（定义在下面，
+# 所以路由注册也放在下面——装饰器在 import 期执行，顺序反了 NameError）。
+# MinIO 模式下由对象存储网关提供 URL，不走这条路（静默跳过）。
+try:
+    get_storage()  # 实例化即确保本地根目录存在
+
+    @app.get("/files/{path:path}", dependencies=[Depends(require_api_key)])
+    async def files(path: str) -> FileResponse:
+        """本地图表/导出文件下载（与 /ask 同鉴权，带路径穿越防护）。"""
+        from pathlib import Path as _Path
+
+        root_dir = _Path(get_settings().storage_local_root).resolve()
+        target = (root_dir / path).resolve()
+        # 路径穿越防护：解析后的绝对路径必须仍在存储根内
+        if not str(target).startswith(str(root_dir)):
+            raise HTTPException(status_code=400, detail="非法路径")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        return FileResponse(target)
+
+except Exception:
+    pass
 
 @app.get("/health")
 async def health() -> dict:
@@ -139,6 +150,19 @@ async def resume_endpoint(
     session_id = body.get("session_id") or "default"
     if "value" not in body:
         raise HTTPException(status_code=400, detail="value is required")
+    # 最终审查修复：早期不校验 value 与挂起中断的匹配关系——澄清中断收到
+    # {"approved": true} 被当成澄清回答吞掉；对没有挂起中断的 session resume
+    # 也返回 200 + 旧终态。现在先查状态机当前有没有挂起中断、类型对不对。
+    from app.application.ask_service import pending_interrupt
+
+    pending = await pending_interrupt(session_id)
+    if pending is None:
+        raise HTTPException(status_code=409, detail="没有等待恢复的中断（会话未暂停）")
+    value = body["value"]
+    if pending.get("type") == "clarification" and not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="澄清中断需要字符串形式的回答")
+    if pending.get("type") == "approval" and not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail='审批中断需要 {"approved": true/false} 对象')
 
     async def gen() -> AsyncIterator[str]:
         try:

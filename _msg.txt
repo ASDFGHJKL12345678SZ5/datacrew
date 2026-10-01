@@ -1,9 +1,0 @@
-D7: GitHub Actions CI（lint + 44 测试，PG/Redis 服务，无需 API Key）
-
-- CI 与本地 docker compose 共用 deploy/postgres/init 同一套 SQL：
-  schema/role/eval 表都在 CI 里真实建出来，不会本地过 CI 挂
-- mock 数据用 --scale 0.1（5k 用户/50k 订单）：测试验证查询语义，
-  不需要 200w 行量级，换 CI 分钟数
-- LLM_MODE=mock 默认值即 CI 友好：四条控制流（澄清/自愈/审批/正常）
-  用规则假模型全覆盖
-- 顺手删掉 scripts/load_test.py 未用的 statistics import

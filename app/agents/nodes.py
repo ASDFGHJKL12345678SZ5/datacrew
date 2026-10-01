@@ -106,7 +106,7 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
                 f"{schema_context.get('tables') and _fmt_schema_context(schema_context)}"
             ),
         },
-    ])
+    ], tier="small")  # 歧义检测是轻任务（结构化小输出），走轻量模型——分级路由的真实调用点
 
     # 3. 歧义处理：未澄清过才追问（澄清过的直接放行，防止死循环）
     ambiguity = analysis.get("ambiguity")
@@ -236,12 +236,30 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------- InsightWriter
+# token 预算（README §8 承诺的实现）：单请求最多喂 10 行；单格超 200 字符
+# 截断；整段上下文超 4000 字符再截断——超限时 log.warning 告警。
+# 防的是"单行 944KB 的 array_agg 把 prompt 撑爆"这类真实事故。
+MAX_CELL_CHARS = 200
+MAX_CONTEXT_CHARS = 4000
+
+
+def _fmt_rows_for_llm(columns: list[str] | None, rows: list) -> str:
+    """把查询结果格式化成给 LLM 的上下文（带 token 预算截断与告警）。"""
+    clipped = [[str(c)[:MAX_CELL_CHARS] for c in row] for row in rows]
+    text = f"列: {columns}\n数据（前{len(clipped)}行）: {clipped}"
+    if len(text) > MAX_CONTEXT_CHARS:
+        text = text[:MAX_CONTEXT_CHARS] + "…[超token预算已截断]"
+        log.warning("insight.token_budget_exceeded", extra={"context": {"rows": len(clipped)}})
+    elif any(len(str(c)) > MAX_CELL_CHARS for row in rows for c in row):
+        log.warning("insight.cell_truncated", extra={"context": {"limit": MAX_CELL_CHARS}})
+    return text
+
 async def insight_writer_node(state: AgentState) -> dict[str, Any]:
     """把查询结果写成业务结论。"""
     started = time.perf_counter()
     result = state.get("sql_result") or {}
     rows = result.get("rows", [])[:10]  # 最多喂 10 行，控制 token
-    result_ctx = f"列: {result.get('columns')}\n数据（前{len(rows)}行）: {rows}"
+    result_ctx = _fmt_rows_for_llm(result.get("columns"), rows)
 
     # 结论是自由文本，不走 JSON 解析（与 SQLGenerator 的 JSON 输出不同）
     chat_fn = get_chat_fn()

@@ -72,7 +72,6 @@ _DANGEROUS_INTENTS: list[tuple[tuple[str, ...], str]] = [
     (("哪些表", "什么表", "都有什么"), "SELECT table_name FROM information_schema.tables"),
     (("评测表",), "SELECT question FROM eval.queries"),
     (("全部字段",), "SELECT * FROM biz.orders"),
-    (("注释",), "SELECT COUNT(*) FROM biz.orders WHERE 1=1 -- AND channel='app'"),
     (("嵌套",), "SELECT COUNT(*) FROM ("
      + "SELECT * FROM (" * 12 + "SELECT id FROM biz.orders" + ") t" * 12 + ") x"),
     (("清空", "截断"), "TRUNCATE TABLE biz.orders"),

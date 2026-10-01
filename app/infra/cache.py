@@ -36,12 +36,23 @@ async def close_redis() -> None:
 
 
 async def cache_get(key: str) -> Any | None:
-    raw = await get_redis().get(key)
-    return json.loads(raw) if raw else None
+    """读缓存；Redis 故障降级为 None（缓存是优化，不是依赖——最终审查修复：
+    早期版 ConnectionError 一路炸穿 load_allowed_tables -> execute_sql ->
+    executor_node -> SSE error，Redis 一挂整条问数链路硬失败）。"""
+    try:
+        raw = await get_redis().get(key)
+        return json.loads(raw) if raw else None
+    except Exception as e:
+        log.warning("cache.get_degraded", extra={"context": {"key": key, "reason": str(e)[:80]}})
+        return None
 
 
 async def cache_set(key: str, value: Any, ttl_s: int = 600) -> None:
-    await get_redis().set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl_s)
+    """写缓存；Redis 故障静默跳过（同上：降级不阻塞主链路）。"""
+    try:
+        await get_redis().set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl_s)
+    except Exception as e:
+        log.warning("cache.set_degraded", extra={"context": {"key": key, "reason": str(e)[:80]}})
 
 
 async def token_bucket(key: str, capacity: int, refill_per_min: int) -> bool:
@@ -68,8 +79,14 @@ async def token_bucket(key: str, capacity: int, refill_per_min: int) -> bool:
     redis.call('EXPIRE', k, 3600)
     return 1
     """
-    ok = await get_redis().eval(lua, 1, key, _now(), capacity, refill_per_min)
-    return bool(ok)
+    try:
+        ok = await get_redis().eval(lua, 1, key, _now(), capacity, refill_per_min)
+        return bool(ok)
+    except Exception as e:
+        # 限流器故障时 fail-open（放行）：Redis 挂掉时拒掉所有请求比不限流
+        # 更糟；可见性由 /health 的 redis:false 和这里的告警保证。
+        log.warning("ratelimit.degraded_open", extra={"context": {"reason": str(e)[:80]}})
+        return True
 
 
 def _now() -> float:

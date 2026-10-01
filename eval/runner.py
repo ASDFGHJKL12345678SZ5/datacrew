@@ -38,6 +38,13 @@ REFUSAL_WORDS = ("无法", "没有", "未能", "抱歉", "不支持", "无法回
 NL = chr(10)
 
 
+# Windows 控制台默认 GBK：✓/✗ 和中文报表会 UnicodeEncodeError 直接崩在打印上
+# （实测踩坑：120 题评测跑完第一题就炸，结果全丢）。强制 stdout/stderr UTF-8，
+# errors=replace 兜底极端字符。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 async def run_one(q: dict, idx: int) -> dict:
     """跑一条评测，返回判定记录。"""
     session_id = f"eval-r{idx}"

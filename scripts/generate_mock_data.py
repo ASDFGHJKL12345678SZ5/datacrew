@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import random
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import asyncpg
+import redis.asyncio as aioredis
 
 # ---------------------------------------------------------------- 基础配置
 SEED = 42
@@ -332,6 +334,22 @@ async def verify(dsn: str) -> bool:
         await conn.close()
 
 
+async def _invalidate_caches() -> None:
+    """失效 schema 注册表与指标口径的 Redis 缓存（两级都清）。
+
+    脚本直连 Redis 而不是 import app 模块：保持脚本独立可移植
+    （CI/本地不依赖 venv 里的 app 包也能跑）。
+    """
+    client = aioredis.from_url(_redis_url(), encoding="utf-8")
+    try:
+        await client.delete("schema:allowed_tables", "schema:metric_definitions")
+    finally:
+        await client.aclose()
+
+
+def _redis_url() -> str:
+    return os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="生成 mock 电商数据")
     ap.add_argument("--scale", type=float, default=1.0, help="规模倍率，0.1 = 十分之一")
@@ -342,6 +360,12 @@ def main() -> int:
     if args.verify:
         return 0 if asyncio.run(verify(args.dsn)) else 1
     asyncio.run(load_data(args.scale, args.dsn))
+    # 数据重灌后失效 schema/口径两级 Redis 缓存：metric_definitions 是被重写的，
+    # 不清缓存的话 Agent 最长 1 小时还在用旧口径（最终审查实测发现的真 bug）。
+    try:
+        asyncio.run(_invalidate_caches())
+    except Exception as e:  # Redis 不在线不阻塞生成（本地脚本场景）
+        print(f"[warn] 缓存失效跳过: {e}")
     return 0 if asyncio.run(verify(args.dsn)) else 1
 
 

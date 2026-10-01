@@ -12,7 +12,7 @@
 | SQL 报错无自愈 | 一次报错整个对话死掉 | Executor 报错回灌 LLM 修正，≤3 轮 |
 | 危险操作不可控 | DROP/全表扫描造成事故 | 七道安全闸 + 危险 SQL 转人工审批（human-in-the-loop） |
 
-外加两个生产级关切：**质量可度量**（120 条客观评测集 + eval_runs 版本化回归）、**成本可控**（模型分级路由 + token 预算 + Redis 三级缓存）。
+外加两个生产级关切：**质量可度量**（120 条客观评测集 + eval_runs 版本化回归）、**成本可控**（模型分级路由 + token 预算 + 三级缓存）。模型分级路由：口径识别等"小活"走 tier=small 的小模型档，主生成仍走主模型（默认配置两个档同一模型时 tier 路由是直通，切模型只改配置不改代码）。
 
 ## 2. 架构总览
 
@@ -38,7 +38,7 @@
                     └───────┬──────────────────┬──────────────────┬───────┘
                             ▼                  ▼                  ▼
                     PostgreSQL(biz)        Redis            MinIO
-                    datacrew_ro 只读角色    三级缓存          图表/导出
+                    datacrew_ro 只读角色    L1进程/L2Redis/L3PG 三级缓存   图表/导出
 ```
 
 状态机图（GitHub 可直接渲染；节点名与 app/agents/supervisor.py 一致）：
@@ -160,10 +160,13 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 
 ## 8. 安全设计速查
 
-- SQL 七道闸：见 `app/tools/sql_execute.py`（D1 实现）
+- SQL 七道闸：见 `app/tools/sql_guard.py`（D1 实现；`sql_execute.py` 是闸后的执行器）
 - 只读角色 `datacrew_ro`：见 `deploy/postgres/init/02_roles.sql`
-- 限流：Redis token bucket，每 key 20 次/分钟
-- token 预算：单请求超限截断并告警（D2）
+- 限流：Redis token bucket，每 key 20 次/分钟（Redis 故障 fail-open + 告警：限流器挂掉时拒全部请求比不限流更糟，可见性由 /health 的 redis:false 兜底）
+- token 预算：喂给洞察节点前单请求上下文截断并告警（D2；cells>200 字符/总量>4000 字符即截断，log.warning 告警）
+- /files 图表下载与 /ask 同鉴权（API Key）+ 路径穿越防护：图表就是历次查询的真实业务数据，而图表 key 是毫秒时间戳可枚举，端口可达不能无鉴权拖全量（最终审查修复，早期是 StaticFiles 裸挂）
+- 同 session 多轮提问：每轮开始重置上一轮产物字段（clarified_answer/error/sql/approval/…，thread_id=session_id 的恢复语义只对"一轮内的中断续跑"生效，不把上一轮答案漏进下一轮）；/ask/resume 先校验有没有挂起中断（无→409）再校验 value 形态与中断类型匹配（澄清要字符串、审批要对象）
+- 三级缓存：schema 白名单与口径定义走 L1 进程内（30s TTL）→ L2 Redis（1h）→ L3 PG information_schema；每级 miss 才落下一级，Redis 故障自动降级直查库——缓存是优化不是依赖
 
 ## 9. D1 实测数据（简历数字的证据链）
 
@@ -188,7 +191,7 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 
 | 指标 | 实测值 | 来源 / 复现方式 |
 |---|---|---|
-| 测试总量 | 84/84 通过（28 安全闸 + 20 图表 + 10 沙箱 + 7 控制流集成 + 5 评测哈希 + 4 checkpointer + 3 观测降级 + 7 MCP stdio 集成） | `pytest tests/`（checkpointer/eval_hash/MCP 集成需 PG 环境） |
+| 测试总量 | 111/111 通过（55 安全闸 + 20 图表 + 10 沙箱 + 7 控制流集成 + 5 评测哈希 + 4 checkpointer + 3 观测降级 + 7 MCP stdio 集成） | `pytest tests/`（checkpointer/eval_hash/MCP 集成需 PG 环境） |
 | 控制流覆盖 | 澄清中断恢复 / SQL 自愈 / 审批批准 / 审批优雅拒绝 / 无歧义直达 五条全过 | `tests/test_state_machine.py` |
 | 自愈行为 | 错误列名 sale_amount → 回灌 schema → 改用 pay_amount，1 次重试成功（3 渠道 3 行真实数据） | 集成测试 + API 冒烟 |
 | 审批兜底 | 批准大表扫描后自动 LIMIT 1000（审批语义是"允许扫表"不是"允许灌爆上下文"） | API 冒烟第 4 步 |
@@ -211,8 +214,8 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 | 指标 | 实测值 | 来源 / 复现方式 |
 |---|---|---|
 | 评测集规模 | 120 条 / 7 类：simple_agg 35、multi_join 25、time_range 15、metric_def 15、ambiguous 10、should_refuse 10、unanswerable 10 | `eval/build_eval_set.py`，金标 SQL 逐条执行验证后才入库（跑不通即构建失败） |
-| 全量跑分（mock） | 22/120 = 18.3%（与真实模型 31.7% 同集对照：mock 的不是模型是流水线） | `python eval/runner.py`，结果落 `eval.runs` + `reports/*.md` |
-| 真实模型跑分（DeepSeek，LLM_MODE=real） | **全量 120 条：38/120 = 31.7%**（simple_agg 37%、metric_def 40%、time_range 33%、ambiguous 40%、should_refuse 60%、multi_join 12%、unanswerable 10%）；simple_agg 25 条子集 8%→28%→40% 三轮迭代史见 ADR D8；成本 ¥1.08/轮、P95 11.2s | `LLM_MODE=real python eval/runner.py`（2026-10-01 实跑，commit 5d5396e） |
+| 全量跑分（mock） | 22/120 = 18.3%（与真实模型 33.3% 同集对照：mock 的不是模型是流水线） | `python eval/runner.py`，结果落 `eval.runs` + `reports/*.md` |
+| 真实模型跑分（DeepSeek，LLM_MODE=real） | **全量 120 条：40/120 = 33.3%**（simple_agg 43%、should_refuse 70%、ambiguous 40%、time_range 33%、metric_def 33%、multi_join 12%、unanswerable 10%）；上一轮（函数白名单闸之前）38/120 = 31.7%，白名单闸无回归；simple_agg 25 条子集 8%→28%→40% 三轮迭代史见 ADR D8；成本 ¥0.85/轮、P95 7.1s | `LLM_MODE=real python eval/runner.py`（2026-10-01 复跑，函数白名单闸修复后） |
 | 危险拦截（mock） | **should_refuse 10/10 = 100%**（DELETE/UPDATE/DROP/TRUNCATE/越权读 eval schema/禁 SELECT 星号/pg_sleep/多语句/information_schema/深层嵌套） | mock 模拟"顺从型 LLM"照单全写，闸逐个拦截 |
 | 无答案拒答（mock） | **unanswerable 10/10 = 100%**（幻觉列/幻觉表连拦 3 次 → failed → 拒答，而非编造答案） | mock 模拟"幻觉型 LLM"硬写 schema 没有的列 |
 | 歧义澄清（mock） | ambiguous 1/10（mock 的 Curator 是规则模型，只认"销售额"一种歧义） | 真实模型的歧义识别能力待 key 到位验证 |
