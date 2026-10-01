@@ -8,13 +8,24 @@ CREATE SCHEMA IF NOT EXISTS eval;
 
 CREATE TABLE eval.queries (
     id          SERIAL PRIMARY KEY,
-    question    TEXT NOT NULL,
+    question    TEXT NOT NULL UNIQUE,   -- 同一问题只一条：build_eval_set 按问题 upsert，不会灌出重复集
     category    VARCHAR(32) NOT NULL,     -- simple / multi_hop / ambiguous / dirty / time_compare
     gold_sql    TEXT NOT NULL,            -- 人工修订过的标准 SQL
     result_hash TEXT NOT NULL,            -- 执行结果集指纹：客观判分依据
     notes       TEXT,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
+
+-- 老库升级：补 question 唯一约束（没有才加，重复数据需先 --reset 清一次）
+DO $
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'eval_queries_question_key'
+        AND conrelid = 'eval.queries'::regclass
+    ) THEN
+        ALTER TABLE eval.queries ADD CONSTRAINT eval_queries_question_key UNIQUE (question);
+    END IF;
+END $;
 
 CREATE TABLE eval.runs (
     id             SERIAL PRIMARY KEY,

@@ -18,7 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # pgvector 镜像：01_schema.sql 需要 CREATE EXTENSION vector。
+        # 曾经用官方 postgres:16 在这里必红（extension vector is not available）——
+        # CI 服务镜像必须和 deploy/postgres/init 的 SQL 要求一致。
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

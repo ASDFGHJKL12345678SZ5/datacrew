@@ -18,6 +18,7 @@ dependencies = [
     "langgraph>=0.2",
     "langgraph-checkpoint-postgres>=2.0",
     "langchain-core>=0.3",
+    "langfuse>=2.60,<3",     # LLM 调用 trace 观测（未配 key 自动降级，见 infra/observability.py）
     "openai>=1.40",          # DeepSeek/Qwen 均 OpenAI 兼容
     "mcp[cli]>=1.2",         # MCP 工具层 SDK
     "langchain-mcp-adapters>=0.1",  # LangGraph agent 通过它调用 MCP 工具

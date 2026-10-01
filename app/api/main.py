@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.application.ask_service import ask, resume
 from app.core.config import get_settings
@@ -45,10 +46,26 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await close_checkpointer()
     await close_redis()
+    from app.infra.observability import shutdown as shutdown_observability
+
+    shutdown_observability()
     log.info("api.stopped")
 
 
 app = FastAPI(title="DataCrew API", version="0.2.0", lifespan=lifespan)
+
+# /files 静态挂载：本地存储适配器产出的图表 URL（/files/charts/xxx.svg）
+# 需要它才能被浏览器/前端直接访问。MinIO 模式下由对象存储网关提供 URL，
+# 不挂本地目录（storage_backend=minio 时此处静默跳过）。
+try:
+    get_storage()  # 实例化即确保本地根目录存在
+    app.mount(
+        "/files",
+        StaticFiles(directory=get_settings().storage_local_root),
+        name="files",
+    )
+except Exception:
+    pass
 
 
 async def require_api_key(x_api_key: str = Header(default="")) -> str:

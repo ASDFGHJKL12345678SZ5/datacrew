@@ -168,6 +168,10 @@ if st.session_state.get("result"):
         if res.get("sql"):
             with st.expander("查看 SQL"):
                 st.code(res["sql"], language="sql")
+        # 图表 URL 是 API 端路径（/files/...），用 API 地址拼全；
+        # 直接相对引用会解析到 Streamlit 自己的端口导致裂图
+        if res.get("chart_url"):
+            st.image(api_base + res["chart_url"], caption="查询结果图表")
         rows = res.get("rows") or []
         if rows:
             st.dataframe(rows, use_container_width=True)

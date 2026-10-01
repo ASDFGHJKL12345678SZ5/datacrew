@@ -22,6 +22,8 @@ from mcp.server.fastmcp import FastMCP
 
 from app.core.logging import get_logger, setup_logging
 from app.infra.db import close_pools, init_pools
+from app.tools.chart_gen import generate_chart
+from app.tools.python_sandbox import run_python
 from app.tools.schema_search import search_schema
 from app.tools.sql_execute import execute_sql
 
@@ -80,18 +82,39 @@ async def schema_search(question: str, top_k: int = 5) -> dict:
     return await search_schema(question, top_k)
 
 
-# ---- D2/D3 预留：以下工具在当前迭代 stub，接口先稳定 ----
-
 @mcp.tool()
-async def python_sandbox(code: str) -> dict:
-    """在隔离沙箱中执行 Python 数据分析代码（禁网/超时/只读）。D3 实现。"""
-    return {"ok": False, "error": "python_sandbox 尚未实现（D3）", "error_type": "not_implemented"}
+async def python_sandbox(code: str, timeout_s: int = 10) -> dict:
+    """在隔离进程中执行 Python 数据分析代码。
+
+    安全边界：隔离解释器（-I）+ socket 禁网守卫 + setrlimit 资源限额
+    （Linux）+ 超时强杀；完整容器级禁网见部署文档（network:none）。
+    代码应 print 输出结果；返回 {"ok", "stdout", "error_type"}。
+
+    Args:
+        code: 待执行的 Python 源码（print 输出分析结果）
+        timeout_s: 超时秒数（1-30，默认 10，到点强杀进程）
+
+    Returns:
+        {"ok": bool, "stdout": str, "error_type": "timeout|blocked|error|ok", ...}
+    """
+    return await run_python(code, timeout_s=timeout_s)
 
 
 @mcp.tool()
 async def chart_gen(chart_type: str, data: list, title: str = "") -> dict:
-    """生成图表并返回存储 URL。D3 实现。"""
-    return {"ok": False, "error": "chart_gen 尚未实现（D3）", "error_type": "not_implemented"}
+    """把查询结果渲染成 SVG 图表（bar/line/pie），落对象存储返回 URL。
+
+    纯 Python 渲染、零依赖、确定性输出；输入对齐 sql_execute 的结果结构。
+
+    Args:
+        chart_type: bar（柱状）| line（折线） | pie（饼图）
+        data: [["标签", 数值], ...] 或 [{"label": ..., "value": ...}]，≤20 个点
+        title: 图表标题
+
+    Returns:
+        {"ok": bool, "url": str, "key": str, "format": "svg", ...}
+    """
+    return await generate_chart(chart_type, data, title=title)
 
 
 if __name__ == "__main__":

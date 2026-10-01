@@ -7,9 +7,11 @@
     这就是"依赖倒置"在基础设施层的具体落地。
 
 用法：
-    from app.infrastructure.storage import get_storage   # 或 app.infra.storage
+    from app.infra.storage import get_storage
     storage = get_storage()
-    url = storage.put("charts/run-001.png", png_bytes, "image/png")
+    # key 不带前导 /；local 模式返回 /files/<key>（API 侧静态挂载），
+    # minio 模式返回预签名 URL
+    url = storage.put("charts/run-001.svg", svg_bytes, "image/svg+xml")
 """
 from __future__ import annotations
 

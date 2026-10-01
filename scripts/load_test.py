@@ -19,6 +19,7 @@ import asyncio
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -44,9 +45,13 @@ QUESTIONS = [
 async def _one(client: httpx.AsyncClient, q: str, key: str, results: list) -> None:
     t0 = time.perf_counter()
     rec = {"latency_ms": 0.0, "ok": False, "kind": ""}
+    # session_id 每请求唯一：复用同一 session 会让 checkpointer 命中"已澄清/
+    # 已失败"的旧状态，测出来的是状态机记忆而不是流水线吞吐（D7 修复）。
+    # 多 key 轮询同样原因：每 key 限流 20 次/分钟，固定 key 测的是限流器。
+    session_id = f"load-{uuid.uuid4().hex[:12]}"
     try:
         async with client.stream(
-            "POST", "/ask", json={"question": q, "session_id": "load"},
+            "POST", "/ask", json={"question": q, "session_id": session_id},
             headers={"X-API-Key": key}, timeout=30.0,
         ) as resp:
             if resp.status_code != 200:

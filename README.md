@@ -78,8 +78,8 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 5. **SQLGenerator**：CoT 生成 SQL（`channel, SUM(pay_amount) ... WHERE pay_time >= ...`，注意用 pay_time 而非 created_at——埋点C）
 6. **Executor**：调用 MCP `sql_execute` → **七道闸**（AST 解析→单语句→表白名单→列白名单→高危词→只读事务+3s 超时+1000 行上限→高危模式转审批）→ 返回结果行
 7. **自愈**：若执行报错，错误信息回灌 SQLGenerator 重试（≤3 轮）
-8. **InsightWriter**：生成结论 + 图表 → 图表存 MinIO，返回预签名 URL
-9. **收尾**：全程 Langfuse trace（每次 LLM 调用的 token/延迟/成本）；评测走 `eval/` 离线链路，与在线链路共用同一套 prompt 与工具
+8. **InsightWriter**：生成结论 + 图表。图表由 `chart_gen` 以纯 Python 渲染成 SVG（零依赖、确定性输出），经 `ObjectStorage` 适配器落盘（local/minio 可切换），URL 随 `result` 事件返回；无数值列/存储故障时只跳过图表，不阻塞结论
+9. **收尾**：全程 Langfuse trace（每次**真实** LLM 调用的 model/token/延迟/成本，见 `app/infra/observability.py`；未配置 key 自动降级为结构化 JSON 日志，观测故障不影响主链路）；评测走 `eval/` 离线链路，与在线链路共用同一套 prompt 与工具
 
 ## 4. 模块地图
 
@@ -88,8 +88,8 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 | `deploy/postgres/init/` | schema（含埋点）、最小权限角色、评测表 | ✅ 已完成 |
 | `app/core/` | 配置（单一入口）、结构化 JSON 日志（stderr） | ✅ 已完成 |
 | `scripts/generate_mock_data.py` | 合成 mock 数据（5w 用户/50w 订单，含埋点） | ✅ 已完成 |
-| `app/infra/` | PG/Redis/对象存储/LLM 客户端（可替换适配器） | ✅ 已完成 |
-| `app/tools/` | MCP Server + 七道安全闸（28 条单测） | ✅ 已完成 |
+| `app/infra/` | PG/Redis/对象存储/LLM 客户端（可替换适配器）+ Langfuse 观测（可降级） | ✅ 已完成 |
+| `app/tools/` | MCP Server（4 工具）+ 七道安全闸 + Python 沙箱 + SVG 图表（58 条单测） | ✅ 已完成 |
 | `app/agents/` | Supervisor 状态机 + 四 Agent 节点 + Mock LLM（CI 可回归） | ✅ 已完成 |
 | `app/application/` + `app/api/` | 问数用例 + FastAPI/SSE 端点（鉴权/限流） | ✅ 已完成 |
 | `app/loops.py` + `app/main.py` | Windows Selector 循环工厂 + 服务入口 | ✅ 已完成 |
@@ -128,7 +128,7 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 
 | 天 | 里程碑 | 验收标准 |
 |---|---|---|
-| D1 ✅ | 基础设施 + mock 数据 + MCP 工具层（七道闸） | 单 Agent 问数跑通；安全闸单测全过（28/28）；MCP 客户端联通验证通过 |
+| D1 ✅ | 基础设施 + mock 数据 + MCP 工具层（七道闸） | 单 Agent 问数跑通；安全闸单测全过（28/28）；MCP 四工具逐一调用验证通过（smoke_mcp：正常查询/禁网/出图/错误输入） |
 | D2 ✅ | 四 Agent + Supervisor 状态机 + 澄清/自愈/人工审批 + SSE API | 33/33 测试通过（5 条控制流集成测试）；API 冒烟全过（鉴权/澄清恢复/审批恢复/LIMIT 兜底）；checkpointer 落 PG 实测读回 |
 | D3 ✅ | 120 条评测集 + 跑分调优 + 压测 + Streamlit demo + Compose | 评测集 120 条七类；mock 下安全类 20/20；P95 928ms；压测 QPS 1.9→18（并发 10）、P50 4.9s→300ms；Streamlit demo（澄清/审批交互）；compose app 服务 |
 | D4-D6 | （项目二 FinRAG，独立仓库） | — |
@@ -139,6 +139,7 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 - **为什么 LangGraph 而不是自己写循环**：checkpointer 原生支持 interrupt/resume，human-in-the-loop 和"刷新页面不丢会话"开箱即得；且是大厂主流栈，面试同频。
 - **为什么项目一用 pgvector 而不是 Qdrant**：口径知识只有几百条，pgvector 省一个服务；项目二数据量大且需要 dense+sparse 混合检索，才上 Qdrant。选型跟着规模走，不跟风。
 - **为什么 Langfuse 用云免费额度而不是自托管**：自托管要额外 4 个容器（clickhouse 等），学生本机吃不消；云免费额度足够 demo。生产环境再自托管。
+- **D7：Langfuse 集成为什么包一层适配器、为什么固定 v2**：langfuse v3+ 迁到 OpenTelemetry，v4 直接删除了旧版 `client.trace()/.generation()` API。我们把 SDK 关在 `app/infra/observability.py` 一个小文件里：配了 key 且 SDK 可用 → 每次真实 LLM 调用记一条 trace + 一个 generation（model/token/延迟/成本/session_id）；没配 key（CI/本地默认）→ 静默降级为结构化 JSON 日志，**观测故障永不影响问数主链路**（三个单测守住降级路径）。固定 `langfuse>=2.60,<3` 因为 v2 的 client API 最直接；将来迁 v3+ 只需重写适配器内部，业务代码零改动——这就是适配层的价值。mock 模式不记 trace（本地规则假模型没有观测价值）。
 - **为什么对象存储先用本地磁盘而不是 MinIO**：当前网络环境 Docker Hub 对大镜像（nginx/minio）匿名拉取返回 401、dl.min.io CDN 410、quay.io 401，镜像不可得。存储能力被抽象为 `ObjectStorage` 协议（`app/infra/storage.py`），本地实现先跑通全流程；网络恢复后 `.env` 改 `STORAGE_BACKEND=minio` 即切换，业务代码零改动。适配器模式在此刻就产生了回报。
 - **为什么数据库初始化脚本要拒绝 Agent 读 eval schema**：`eval.queries` 存有 gold_sql（标准答案），Agent 的 DB 身份一旦可读即可作弊。权限即安全边界，已实测：`datacrew_ro` 读 `eval.queries` → permission denied。
 - **为什么 eval schema 不给 Agent 的 DB 角色授权**：gold_sql 是标准答案，可读即可作弊。权限设计本身就是安全叙事。
@@ -146,6 +147,11 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 - **D2：为什么 Windows 开发环境要自定义事件循环工厂**：uvicorn 在 Windows 上强制 ProactorEventLoop（为子进程 worker 设计），而 psycopg 异步模式（langgraph checkpointer 的依赖）在 Proactor 下直接报错。本服务无子进程 worker 需求，通过 `uvicorn.run(loop="app.loops:selector_loop_factory")` 注入 Selector 循环工厂。**踩坑记录：自定义工厂被 asyncio.Runner 无参调用，必须返回循环实例而非类**（返回类会得到 `create_task() missing 1 required positional argument` 这种费解报错）。
 - **D2（D3 已修订）：checkpointer 从单连接改为连接池（2-10 条）+ 池模式去全局锁**：初版单连接的理由是“checkpoint 写入按 thread 串行、单连接不构成瓶颈，且 psycopg_pool 后台 worker 在 uvicorn 循环下建连不稳定”。D3 压测推翻了这个判断——单连接下所有 checkpoint 操作串在一条连接上，QPS 锁死 3.9、并发 20 时 P50 4.7s。改为 AsyncConnectionPool 后兼容问题没有复现（根因是当时的 Proactor 循环，现已全局 Selector），实测 QPS 随并发扩展到 18。autocommit=True 仍是硬要求（setup() 含 CREATE INDEX CONCURRENTLY），经 kwargs 下传给每条连接。
 - **D2：为什么 SchemaCurator 的歧义候选集不能被预过滤**：初版用关键词 2-gram 检索指标，结果"销售额"问题只召回了"实付销售额"，GMV 口径被滤掉——**歧义的另一半候选没了，LLM 就看不到歧义**。修正为口径注册表全量注入（歧义判断需要全部候选在场），2-gram 只用于排序；表清单才按需过滤。检索可以排序，不能把候选滤空。
+- **D7：chart_gen 为什么手写 SVG 而不用 matplotlib**：①零依赖，镜像不增大 100MB+，CI/离线环境直接可跑；②确定性输出——同一数据永远同一 SVG，评测与回归可比对（matplotlib 默认样式随版本漂移，截图对比是噩梦）；③SVG 是文本，前端 `<img>` 直接用、可 diff；④问数图表本质是"前 10 行聚合值"的 10 根柱子，为它引入渲染引擎是过度工程。输入严格两列 `[label, value]`，多列静默丢弃不如明确报错让 Agent 自愈（错误信息即修复指令）。
+- **D7：python_sandbox 的四道边界与诚实边界**：LLM 生成的代码同样不可信，所以沙箱的哲学与七道闸同构——不信任执行体，确定性边界兜底：①`python -I` 隔离解释器（无用户 site/无 PYTHONPATH/CWD 不进 sys.path）；②子进程内 socket 三件套（socket/create_connection/getaddrinfo）替换为抛异常的守卫，网络尝试一律 blocked；③Linux `setrlimit` 限 CPU 时间与文件大小（Windows 无此模块，退化为仅超时）；④`subprocess` timeout 到点强杀。**诚实边界**：进程级禁网防不住 ctypes 直调 syscall 级别的攻击——那是容器 `network:none` 的职责，本实现是纵深防御中的一层，不是安全产品的竞品（README 与代码 docstring 都写明了这一点，面试主动说）。
+- **D7：为什么 CI 服务镜像必须是 pgvector 而不是官方 postgres:16**：`deploy/postgres/init/01_schema.sql` 需要 `CREATE EXTENSION vector`，官方镜像没带 pgvector，CI 初始化步骤必红（`extension "vector" is not available`）。CI 服务镜像必须与 `deploy/` 下同一套 SQL 的要求一致——CI 与本地 compose 共用 init 脚本的设计反过来要求镜像也统一。曾用错镜像，已修复并留此 ADR。
+- **D7：interrupt 恢复的隐藏成本（面试深挖点）**
+- **D7：子进程不继承父进程的协议管道 stdin（MCP stdio 死等事故）**：python_sandbox 在单测里全过、连上 MCP stdio server 后**每次必超时**。根因：`subprocess.run` 默认让子进程继承父进程 stdin，而 MCP server 的 stdin 正是与客户端通信的协议管道——子进程拿着这个句柄永远完不了（实测：默认继承 → communicate 死等 10s 超时；显式 `stdin=subprocess.DEVNULL` → 70ms 正常返回）。**触发条件是"运行在协议管道环境里"，所以单元测试根本抓不到**——已补 tests/test_mcp_integration.py：真实 spawn stdio server 走 JSON-RPC 调 4 个工具，专治这类"只在集成形态下现形"的 bug。通用纪律：凡是要起子进程的服务（MCP server、systemd socket 服务、uwsgi worker），一律显式给 stdin DEVNULL 或具体 fd，别继承。：LangGraph 的 resume 会**从节点开头重跑**，不是从中断点续跑——用户回答澄清后，`schema_curator` 的 schema 检索与 LLM 分析会完整再执行一遍（interrupt 之前的 IO 不落 checkpoint）；executor 的审批恢复会再跑一次 SQL 校验（只读、不执行）后再放行。恢复的正确性由框架保证，重复成本由架构消化：中断前的 IO 都是幂等的（检索/校验），真正有副作用的动作（执行 SQL、写 MinIO）全部放在 interrupt 之后。
 - **D3：为什么结果集哈希要双排序 + 数值格式化**：金标 SQL 与 Agent SQL 的列顺序、ORDER BY 不保证一致，1.5 与 1.50 也是同一答案。行内值排序 + 行排序 + 2 位小数，把"表示差异"从"语义差异"里剥出来，否则评测会系统性冤枉正确答案。
 - **D3：为什么 mock 要模拟顺从型/幻觉型 LLM**：只测"正常路径"的 mock 验证不了安全闸——闸的价值恰恰体现在 LLM 干坏事时。mock 按危险意图照单全写、按幻觉维度硬写不存在的列，让 CI 无 Key 也能端到端验证 10 类攻击全部被拦。
 - **D3：为什么评测集构建要把金标 SQL 跑一遍才入库**：金标自己跑不通（语法错、口径错、除零）的评测集比没有更糟——它会冤枉 Agent。构建脚本把"金标执行失败"当构建失败处理，90 条执行类金标全部实测通过才落库。
@@ -169,7 +175,7 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 | 双 11 尖峰 | 19,323 单/日 vs 平日 1,262 单/日（15.3 倍） | verify 尖峰检查 |
 | 用户集中度 | Top100 用户贡献 1.2% 订单，单人最高 69 单 | verify 帕累托检查 |
 | 安全闸单测 | 28/28 通过（每道闸配攻击用例） | `pytest tests/` |
-| MCP 联通 | 4 个工具经 MCP stdio 协议被客户端发现并调用成功 | `scripts/smoke_mcp.py` |
+| MCP 联通 | 4 个工具经 MCP stdio 协议被客户端发现**并逐一调用成功**（正常查询/攻击拦截/沙箱计算/沙箱禁网/图表生成/图表错误输入六条路径） | `scripts/smoke_mcp.py` |
 | 业务查询延迟 | 聚合查询端到端 39ms（含七道闸+只读事务） | `scripts/smoke_tools.py` |
 | 攻击拦截 | 多语句注入 / pg_sleep / 未授权表（eval.queries）均被拒并记录 WARNING 日志 | smoke 测试输出 |
 - 密钥：`.env` 永不提交；`.env.example` 只有占位符
@@ -181,7 +187,7 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 
 | 指标 | 实测值 | 来源 / 复现方式 |
 |---|---|---|
-| 测试总量 | 44/44 通过（28 安全闸 + 7 控制流集成 + 5 评测哈希不变量） | `pytest tests/` |
+| 测试总量 | 84/84 通过（28 安全闸 + 20 图表 + 10 沙箱 + 7 控制流集成 + 5 评测哈希 + 4 checkpointer + 3 观测降级 + 7 MCP stdio 集成） | `pytest tests/`（checkpointer/eval_hash/MCP 集成需 PG 环境） |
 | 控制流覆盖 | 澄清中断恢复 / SQL 自愈 / 审批批准 / 审批优雅拒绝 / 无歧义直达 五条全过 | `tests/test_state_machine.py` |
 | 自愈行为 | 错误列名 sale_amount → 回灌 schema → 改用 pay_amount，1 次重试成功（3 渠道 3 行真实数据） | 集成测试 + API 冒烟 |
 | 审批兜底 | 批准大表扫描后自动 LIMIT 1000（审批语义是"允许扫表"不是"允许灌爆上下文"） | API 冒烟第 4 步 |

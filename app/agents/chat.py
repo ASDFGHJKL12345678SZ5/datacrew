@@ -22,7 +22,9 @@ _FENCE = chr(96) * 3  # 三个反引号：LLM 常把 JSON 包在代码块里
 
 
 class ChatFn(Protocol):
-    async def __call__(self, messages: list[dict[str, str]], *, json_mode: bool = False) -> str: ...
+    async def __call__(
+        self, messages: list[dict[str, str]], *, json_mode: bool = False, tier: str = "main"
+    ) -> str: ...
 
 
 def _parse_json(text: str) -> dict[str, Any]:
@@ -40,15 +42,33 @@ def _parse_json(text: str) -> dict[str, Any]:
         raise
 
 
-async def _real_chat(messages: list[dict[str, str]], *, json_mode: bool = False) -> str:
+async def _real_chat(
+    messages: list[dict[str, str]], *, json_mode: bool = False, tier: str = "main"
+) -> str:
     from app.infra.llm import get_llm
 
-    resp = await get_llm().chat(messages, json_mode=json_mode)
+    resp = await get_llm().chat(messages, json_mode=json_mode, tier=tier)  # type: ignore[arg-type]
+    # 观测旁路：记 Langfuse trace（未配置 key 时自动降级，不影响主链路）
+    from app.infra.observability import record_generation
+
+    record_generation(
+        model=resp.model,
+        messages=messages,
+        content=resp.content,
+        prompt_tokens=resp.prompt_tokens,
+        completion_tokens=resp.completion_tokens,
+        latency_ms=resp.latency_ms,
+        cost_yuan=resp.cost_yuan,
+        tier=tier,
+    )
     return resp.content
 
 
-async def _mock_chat_async(messages: list[dict[str, str]], *, json_mode: bool = False) -> str:
-    return mock_chat(messages, json_mode=json_mode)
+async def _mock_chat_async(
+    messages: list[dict[str, str]], *, json_mode: bool = False, tier: str = "main"
+) -> str:
+    # tier 对 mock 无意义（本地规则不花钱），签名保持一致让节点代码两种模式零差异
+    return mock_chat(messages, json_mode=json_mode, tier=tier)
 
 
 def get_chat_fn() -> ChatFn:
@@ -59,8 +79,14 @@ def get_chat_fn() -> ChatFn:
     return _mock_chat_async
 
 
-async def chat_json(messages: list[dict[str, str]]) -> dict[str, Any]:
-    """调用 LLM 并把输出解析成 dict（所有节点统一走这里）。"""
+async def chat_json(
+    messages: list[dict[str, str]], *, tier: str = "main"
+) -> dict[str, Any]:
+    """调用 LLM 并把输出解析成 dict（所有节点统一走这里）。
+
+    tier: "main"=主力模型 / "small"=轻量模型（分级路由，成本优化最直接的一刀）。
+    轻任务（歧义检测、意图分类）走 small，重任务（SQL 生成、结论解读）走 main。
+    """
     chat_fn = get_chat_fn()
-    text = await chat_fn(messages, json_mode=True)
+    text = await chat_fn(messages, json_mode=True, tier=tier)
     return _parse_json(text)

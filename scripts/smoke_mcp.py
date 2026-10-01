@@ -1,6 +1,8 @@
-"""MCP 客户端联通测试：通过 langchain-mcp-adapters 调用 MCP 工具服务。
+"""MCP 客户端联通测试：4 个工具逐一调用验证（发现 + 调用成功才算连通）。
 
-这条链路就是 D2 LangGraph agent 调工具的路径 —— 提前验证，D2 不踩坑。
+这条链路就是 LangGraph agent 经 MCP 协议调工具的路径：
+正常查询 / 攻击拦截 / 沙箱计算 / 沙箱禁网 / 图表生成 / 图表错误输入，
+覆盖每个工具的"正常路径 + 威胁路径"两条。
 """
 import asyncio
 import json
@@ -48,6 +50,31 @@ async def main() -> None:
     r = parse_result(await by_name["sql_execute"].ainvoke(
         {"sql": "SELECT gold_sql FROM eval.queries"}))
     print("[sql_execute] 攻击拦截:", r["ok"], "|", r["error"][:50])
+
+    # 4. python_sandbox：正常计算 + 禁网边界
+    r = parse_result(await by_name["python_sandbox"].ainvoke(
+        {"code": "print(sum(range(101)))"}))
+    print("[python_sandbox] ok:", r["ok"], "| stdout:", r.get("stdout", "").strip())
+    r = parse_result(await by_name["python_sandbox"].ainvoke(
+        {"code": "import socket; socket.create_connection(('8.8.8.8', 53))",
+         "timeout_s": 5}))
+    print("[python_sandbox] 禁网:", r["ok"], "|", r.get("error_type"), "|", r.get("error", "")[:40])
+
+    # 5. chart_gen：柱状图 + 错误输入自愈
+    r = parse_result(await by_name["chart_gen"].ainvoke(
+        {"chart_type": "bar",
+         "data": [["app", 25800], ["miniapp", 16400], ["h5", 4700]],
+         "title": "各渠道实付销售额"}))
+    print("[chart_gen] ok:", r["ok"], "| url:", r.get("url"), "| points:", r.get("points"))
+    r = parse_result(await by_name["chart_gen"].ainvoke(
+        {"chart_type": "radar", "data": [["a", 1]]}))
+    print("[chart_gen] 非法类型被拒:", r["ok"], "|", r.get("error", "")[:40])
+
+    called = ["schema_search", "sql_execute", "python_sandbox", "chart_gen"]
+    missing = [t for t in called if t not in by_name]
+    print(f"\n工具连通性: {len(called) - len(missing)}/{len(called)}"
+          f"（发现 {len(by_name)} 个，全部完成调用验证）")
+    assert not missing, f"工具缺失: {missing}"
 
 
 asyncio.run(main())

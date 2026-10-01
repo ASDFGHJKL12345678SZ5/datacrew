@@ -77,6 +77,7 @@ async def _events_after_stream(graph, config) -> AsyncIterator[dict[str, Any]]:
         "columns": (values.get("sql_result") or {}).get("columns"),
         "rows": (values.get("sql_result") or {}).get("rows"),
         "row_count": (values.get("sql_result") or {}).get("row_count"),
+        "chart_url": (values.get("insight") or {}).get("chart_url"),
         "retry_count": values.get("retry_count", 0),
     }
 

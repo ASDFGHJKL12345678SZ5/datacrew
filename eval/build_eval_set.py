@@ -455,15 +455,23 @@ async def main() -> None:
                 print("   ", f_)
             raise SystemExit(1)
 
+        # 按 (question, category) upsert：重跑 = 刷新金标哈希，不产生重复集。
+        # 曾经默认纯 INSERT——mock 数据一重建，库里 120 条旧哈希 + 120 条新哈希，
+        # 评测集自己分裂成两份（一次 eval run 双倍成本，且旧哈希全部失真）。
         await conn.executemany(
             """
             INSERT INTO eval.queries (question, category, gold_sql, result_hash, notes)
             VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (question, category) DO UPDATE SET
+                category = EXCLUDED.category,
+                gold_sql = EXCLUDED.gold_sql,
+                result_hash = EXCLUDED.result_hash,
+                notes = EXCLUDED.notes
             """,
             rows,
         )
         total = await conn.fetchval("SELECT count(*) FROM eval.queries")
-        print(f"\n✅ 灌库完成：{len(rows)} 条（库内总计 {total}）")
+        print(f"\n✅ 灌库完成：{len(rows)} 条（库内总计 {total}，按问题 upsert）")
         for category, _ in EXECUTION_CATEGORIES + [(c, i) for c, i, _ in BEHAVIOR_CATEGORIES]:
             n = await conn.fetchval(
                 "SELECT count(*) FROM eval.queries WHERE category = $1", category
