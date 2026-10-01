@@ -151,6 +151,7 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 - **D7：python_sandbox 的四道边界与诚实边界**：LLM 生成的代码同样不可信，所以沙箱的哲学与七道闸同构——不信任执行体，确定性边界兜底：①`python -I` 隔离解释器（无用户 site/无 PYTHONPATH/CWD 不进 sys.path）；②子进程内 socket 三件套（socket/create_connection/getaddrinfo）替换为抛异常的守卫，网络尝试一律 blocked；③Linux `setrlimit` 限 CPU 时间与文件大小（Windows 无此模块，退化为仅超时）；④`subprocess` timeout 到点强杀。**诚实边界**：进程级禁网防不住 ctypes 直调 syscall 级别的攻击——那是容器 `network:none` 的职责，本实现是纵深防御中的一层，不是安全产品的竞品（README 与代码 docstring 都写明了这一点，面试主动说）。
 - **D7：为什么 CI 服务镜像必须是 pgvector 而不是官方 postgres:16**：`deploy/postgres/init/01_schema.sql` 需要 `CREATE EXTENSION vector`，官方镜像没带 pgvector，CI 初始化步骤必红（`extension "vector" is not available`）。CI 服务镜像必须与 `deploy/` 下同一套 SQL 的要求一致——CI 与本地 compose 共用 init 脚本的设计反过来要求镜像也统一。曾用错镜像，已修复并留此 ADR。
 - **D7：interrupt 恢复的隐藏成本（面试深挖点）**
+- **D8：评测驱动的迭代（mock 测管线，真实测质量）**：mock 模式 18.3% 全绿不代表系统好——换成真实 DeepSeek 后 simple_agg 仅 8%，三轮迭代到 40%：①"必须指出歧义"的提示词被指令遵循能力强的模型放大成逢词必拆（22/25 误追问）→ 保守原则+反例+few-shot；②相对时间按系统今天算而金标按数据截止日 → 注入 orders.max(created_at) 作锚点；③模型自发加问题里没有的时间过滤 → 明令禁止；④真实模型偶发非法 JSON 致 23s 自愈卡死 → 解析失败立即重试。**方法论：每轮修一个根因、复测同一子集、记录成本（¥0.009/题）。**
 - **D7：子进程不继承父进程的协议管道 stdin（MCP stdio 死等事故）**：python_sandbox 在单测里全过、连上 MCP stdio server 后**每次必超时**。根因：`subprocess.run` 默认让子进程继承父进程 stdin，而 MCP server 的 stdin 正是与客户端通信的协议管道——子进程拿着这个句柄永远完不了（实测：默认继承 → communicate 死等 10s 超时；显式 `stdin=subprocess.DEVNULL` → 70ms 正常返回）。**触发条件是"运行在协议管道环境里"，所以单元测试根本抓不到**——已补 tests/test_mcp_integration.py：真实 spawn stdio server 走 JSON-RPC 调 4 个工具，专治这类"只在集成形态下现形"的 bug。通用纪律：凡是要起子进程的服务（MCP server、systemd socket 服务、uwsgi worker），一律显式给 stdin DEVNULL 或具体 fd，别继承。：LangGraph 的 resume 会**从节点开头重跑**，不是从中断点续跑——用户回答澄清后，`schema_curator` 的 schema 检索与 LLM 分析会完整再执行一遍（interrupt 之前的 IO 不落 checkpoint）；executor 的审批恢复会再跑一次 SQL 校验（只读、不执行）后再放行。恢复的正确性由框架保证，重复成本由架构消化：中断前的 IO 都是幂等的（检索/校验），真正有副作用的动作（执行 SQL、写 MinIO）全部放在 interrupt 之后。
 - **D3：为什么结果集哈希要双排序 + 数值格式化**：金标 SQL 与 Agent SQL 的列顺序、ORDER BY 不保证一致，1.5 与 1.50 也是同一答案。行内值排序 + 行排序 + 2 位小数，把"表示差异"从"语义差异"里剥出来，否则评测会系统性冤枉正确答案。
 - **D3：为什么 mock 要模拟顺从型/幻觉型 LLM**：只测"正常路径"的 mock 验证不了安全闸——闸的价值恰恰体现在 LLM 干坏事时。mock 按危险意图照单全写、按幻觉维度硬写不存在的列，让 CI 无 Key 也能端到端验证 10 类攻击全部被拦。
@@ -211,6 +212,7 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 |---|---|---|
 | 评测集规模 | 120 条 / 7 类：simple_agg 35、multi_join 25、time_range 15、metric_def 15、ambiguous 10、should_refuse 10、unanswerable 10 | `eval/build_eval_set.py`，金标 SQL 逐条执行验证后才入库（跑不通即构建失败） |
 | 全量跑分（mock） | 22/120 = 18.3% | `python eval/runner.py`，结果落 `eval.runs` + `reports/*.md` |
+| 真实模型跑分（DeepSeek，LLM_MODE=real） | simple_agg 25 条：**8% → 28% → 40%** 三轮评测驱动迭代（详见 ADR D8）；实测成本 ¥0.009/题 | `LLM_MODE=real python eval/runner.py --limit 25` |
 | 危险拦截（mock） | **should_refuse 10/10 = 100%**（DELETE/UPDATE/DROP/TRUNCATE/越权读 eval schema/禁 SELECT 星号/pg_sleep/多语句/information_schema/深层嵌套） | mock 模拟"顺从型 LLM"照单全写，闸逐个拦截 |
 | 无答案拒答（mock） | **unanswerable 10/10 = 100%**（幻觉列/幻觉表连拦 3 次 → failed → 拒答，而非编造答案） | mock 模拟"幻觉型 LLM"硬写 schema 没有的列 |
 | 歧义澄清（mock） | ambiguous 1/10（mock 的 Curator 是规则模型，只认"销售额"一种歧义） | 真实模型的歧义识别能力待 key 到位验证 |
