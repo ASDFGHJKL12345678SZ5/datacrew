@@ -7,11 +7,19 @@ import ClarificationCard from '@/components/ClarificationCard.vue'
 import ApprovalCard from '@/components/ApprovalCard.vue'
 import ResultCard from '@/components/ResultCard.vue'
 import { useAsk } from '@/composables/useAsk'
+import { computed, ref } from 'vue'
 
 const {
   state, running, errorMessage, apiKey, sessionId, setSessionId,
-  ask, answerClarification, decideApproval, cancel, reset,
+  healthState, ask, answerClarification, decideApproval, cancel, reset,
 } = useAsk()
+
+// 健康门控：后端不可达时禁止提问（事故教训：朝暂停的容器开枪只会挂死）
+const healthDown = computed(() => healthState.status !== 'ok')
+const downSeconds = ref(0)
+setInterval(() => {
+  downSeconds.value = Math.max(0, Math.round((Date.now() - healthState.since) / 1000))
+}, 1000)
 
 // 状态徽标：让用户永远知道系统现在卡在哪一步（尤其 interrupt 挂起时）
 const PHASE_META: Record<string, { label: string; tone: string }> = {
@@ -42,7 +50,13 @@ function phaseTone(): string {
       @reset="reset"
     />
 
-    <AskForm :disabled="running" @submit="ask" />
+    <p v-if="healthDown" class="health-banner rise">
+  <b>后端不可达{{ healthState.status === 'probing' ? '（探测中）' : '已 ' + downSeconds + 's' }}</b>
+  提问已临时禁用。<code>docker ps</code> 看容器是否 Paused（是就 <code>docker unpause</code> 恢复），
+  或本地起 <code>python -m app.main</code>。
+</p>
+
+<AskForm :disabled="running || healthDown" @submit="ask" />
 
     <p v-if="errorMessage" class="error-banner rise">
       <b>出错了</b>{{ errorMessage }}
@@ -126,6 +140,12 @@ function phaseTone(): string {
   color: var(--accent); font-size: 12px; font-family: var(--mono);
 }
 .err-text { color: var(--err); font-size: 13px; margin: 0; }
+.health-banner {
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  background: rgba(255, 196, 84, 0.08); border: 1px solid rgba(255, 196, 84, 0.4);
+  color: var(--warn); border-radius: 11px; padding: 11px 16px; margin: 0; font-size: 13px;
+}
+.health-banner code { font-family: var(--mono); font-size: 12px; }
 
 /* ---- 空态：三条路径 ---- */
 .onboard h3 { margin: 8px 0 12px; font-size: 14px; color: var(--text-dim); letter-spacing: 1px; }

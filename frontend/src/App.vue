@@ -7,7 +7,9 @@ let timer: number | undefined
 
 async function checkHealth() {
   try {
-    const res = await fetch('/health')
+    // 6s 超时是必需的：容器被 docker pause 时 TCP 握手仍成功但永不响应，
+    // 没有超时的 fetch 会一直挂起，健康灯假装还是绿的。
+    const res = await fetch('/health', { signal: AbortSignal.timeout(6_000) })
     apiOk.value = res.ok
   } catch {
     apiOk.value = false
@@ -43,7 +45,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
           <span class="dot" />
           <span>{{ apiOk === null ? '检测中' : apiOk ? 'API 已连接 · :8000' : 'API 不可达' }}</span>
         </div>
-        <p v-if="apiOk === false" class="side-hint">后端未响应：确认 datacrew-app 容器在跑，或本地 <code>python -m app.main</code></p>
+        <p v-if="apiOk === false" class="side-hint">后端无响应：<code>docker ps</code> 看容器是否 Paused（是则 <code>docker unpause</code> 恢复），或本地起 <code>python -m app.main</code></p>
       </div>
 
 

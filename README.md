@@ -115,6 +115,10 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 &\.venv\Scripts\python.exe scripts\smoke_tools.py
 &\.venv\Scripts\python.exe scripts\smoke_mcp.py
 
+> ⚠️ **后端只能跑一个**：要么本地 `python -m app.main`（下面第 4 步，推荐开发用），
+> 要么 `docker compose up -d` 全量（含 app 容器）。两个同时跑会抢 8000 端口，
+> 且本机 localhost 会随机解析到不同实例——表现为“有时秒回、有时永久转圈”。
+> 若已双开：`docker stop datacrew-app`（保留 postgres/redis）或停掉本地 python。
 # 4. 启动 API（SSE 问数，默认 mock LLM，无需 API Key）
 &\.venv\Scripts\python.exe -m app.main
 #    另开终端跑 API 冒烟（鉴权/澄清恢复/审批恢复全链路）

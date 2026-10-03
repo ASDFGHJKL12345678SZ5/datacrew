@@ -1,21 +1,24 @@
-// useAsk：把纯 reducer + api 客户端接到 Vue 响应式上（只做接线）。
-// API Key 不暴露给用户：界面上没有输入框，默认 dev-key-001（构建期可用
-// VITE_API_KEY 覆盖）。想换 key 的人改 env，普通用户不该被一个密码框困扰。
-//
-// 健壮性（都由真实事故驱动，一次修三处）：
-//  1. controller 必须在发请求前建好并传进流；
-//  2. 硬超时看门狗：30s 无事件——无论底层 abort 有没有传播——UI 都必须收口；
-//  3. EOF 兜底：流结束但状态机还在 running = 终态丢了，按错误收尾；
-//  4. 取消 = 明确状态：取消后停在“已取消”并保留轨迹，不会假装还在跑。
-import { ref } from 'vue'
+import { ref, onScopeDispose } from 'vue'
 import { askReducer, initialState, type AskState } from '@/services/reducer'
 import { askStream, resumeStream, ApiError } from '@/services/api'
+import { createRound, type Round } from '@/services/round'
+import { createHealthMonitor, type HealthMonitor, type HealthState } from '@/services/health'
 import type { AskEvent } from '@/types/events'
 
-// mock 全链路 <2s；真实 LLM 一轮通常也 <20s。30s 无事件即可判死，
-// 宁可误判重试，也不让用户对着一只永远转圈的按钮。
+// Vue 薄接线层：轮次生命周期/健康状态都在 services/ 的纯模块里（有单测锁行为）。
+// 这里只做三件事：把事件喂给 reducer、把轮次终态映射成 reducer 动作、把健康探针接上 fetch。
+
 const INACTIVITY_MS = 30_000
+const HEALTH_INTERVAL_MS = 15_000
+const HEALTH_TIMEOUT_MS = 6_000
 const DEFAULT_API_KEY = import.meta.env.VITE_API_KEY ?? 'dev-key-001'
+const LIVE_PHASES = ['running', 'clarifying', 'approving']
+
+function probeHealth(signal: AbortSignal): Promise<boolean> {
+  return fetch('/health', { signal })
+    .then((r) => r.ok)
+    .catch(() => false)
+}
 
 export function useAsk() {
   const state = ref<AskState>({ ...initialState })
@@ -23,7 +26,16 @@ export function useAsk() {
   const errorMessage = ref('')
   const apiKey = ref(DEFAULT_API_KEY)
   const sessionId = ref(localStorage.getItem('datacrew.sessionId') || 'demo-001')
-  let controller: AbortController | null = null
+  let round: Round | null = null
+
+  const health: HealthMonitor = createHealthMonitor({
+    probe: probeHealth,
+    intervalMs: HEALTH_INTERVAL_MS,
+    probeTimeoutMs: HEALTH_TIMEOUT_MS,
+  })
+  const healthState: HealthState = health.state
+  health.start()
+  onScopeDispose(() => health.stop())
 
   function setSessionId(v: string) {
     sessionId.value = v
@@ -35,65 +47,81 @@ export function useAsk() {
     state.value = askReducer(state.value, { type: 'event', ev: { event: 'error', message: msg } })
   }
 
-  async function run(gen: AsyncGenerator<AskEvent>, own: AbortController): Promise<void> {
+  function onSettle(kind: string) {
+    if (kind === 'cancelled' && LIVE_PHASES.includes(state.value.phase)) {
+      state.value = askReducer(state.value, { type: 'cancel' })
+    }
+    running.value = false
+    round = null
+  }
+
+  async function run(gen: AsyncGenerator<AskEvent>): Promise<void> {
     running.value = true
     errorMessage.value = ''
-    let timedOut = false
-    let timer: number | undefined
-    const arm = () => {
-      timer = window.setTimeout(() => {
-        timedOut = true
-        own.abort()
-        // 关键：即使 abort 没能传播到 pending read()（代理层吞掉时），
-        // UI 也必须在这里收口，给出明确错误。
-        fail(`连接 ${INACTIVITY_MS / 1000} 秒无新事件，已自动断开（后端无响应或连接被中断）`)
-      }, INACTIVITY_MS)
-    }
-    const disarm = () => { if (timer) { window.clearTimeout(timer); timer = undefined } }
+    const r = round
+    if (!r) return
+    r.arm()
     try {
-      arm()
       for await (const ev of gen) {
+        if (r.settled) return // 已被取消/超时收口：迟到的事件不再改状态
         state.value = askReducer(state.value, { type: 'event', ev })
-        disarm(); arm()
+        r.arm() // 每个事件都是“活着”的证据，重置 deadline
       }
-      if (state.value.phase === 'running') {
+      if (r.settled !== 'cancelled' && state.value.phase === 'running') {
         fail('连接中断：流已结束但未收到终态事件（澄清 / 审批 / 结果 / 错误）。请重试或检查后端')
       }
     } catch (e) {
-      if (e instanceof Error && e.name === 'AbortError') {
-        if (timedOut) return // 超时路径已由 fail() 收口
-        state.value = askReducer(state.value, { type: 'cancel' })
-        return // 主动取消：静默切换为“已取消”
+      if (r.settled) return // 取消/超时路径已收口
+      if (e instanceof ApiError && e.status === 409) {
+        errorMessage.value = '上一轮已失效（后端没有等待恢复的中断了，通常是会话被重启或重复恢复）。请重新提问'
+        state.value = askReducer(state.value, { type: 'reset' })
+        r.settle('failed')
+        return
       }
       const msg = e instanceof ApiError ? `HTTP ${e.status}: ${e.message}` : String(e)
       fail(msg)
+      r.settle('failed')
     } finally {
-      disarm()
-      running.value = false
-      controller = null
+      if (r.settled === null) r.settle('done')
     }
+  }
+
+  function newRound(): Round {
+    // 上一轮若还在（用户狂点/上一轮挂死），先静默停表取代，不弹状态
+    round?.disarm()
+    const r = createRound({
+      inactivityMs: INACTIVITY_MS,
+      onInactivity: () => fail(`连接 ${INACTIVITY_MS / 1000} 秒无新事件，已自动断开（后端无响应或连接被中断）`),
+      onSettle,
+    })
+    round = r
+    return r
   }
 
   function ask(question: string) {
     state.value = askReducer(state.value, { type: 'start', question })
-    controller = new AbortController()
-    return run(askStream(question, sessionId.value, apiKey.value, controller.signal), controller)
+    const r = newRound()
+    return run(askStream(question, sessionId.value, apiKey.value, r.signal))
   }
 
   function answerClarification(answer: string) {
-    controller = new AbortController()
-    return run(resumeStream(sessionId.value, answer, apiKey.value, controller.signal), controller)
+    const r = newRound()
+    return run(resumeStream(sessionId.value, answer, apiKey.value, r.signal))
   }
 
   function decideApproval(approved: boolean) {
-    controller = new AbortController()
-    return run(resumeStream(sessionId.value, { approved }, apiKey.value, controller.signal), controller)
+    const r = newRound()
+    return run(resumeStream(sessionId.value, { approved }, apiKey.value, r.signal))
   }
 
-  function cancel() { controller?.abort() }
+  // 取消：同步收口（round.cancel 不等 abort 传播，tests/round.test.ts 锁死）
+  function cancel() {
+    round?.cancel()
+  }
 
   function reset() {
-    controller?.abort()
+    round?.disarm()
+    round?.settle('failed')
     state.value = askReducer(state.value, { type: 'reset' })
     errorMessage.value = ''
     running.value = false
@@ -101,6 +129,6 @@ export function useAsk() {
 
   return {
     state, running, errorMessage, apiKey, sessionId, setSessionId,
-    ask, answerClarification, decideApproval, cancel, reset,
+    healthState, ask, answerClarification, decideApproval, cancel, reset,
   }
 }
