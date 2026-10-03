@@ -18,8 +18,8 @@
 
 ```
 ┌──────────────┐   SSE 流式    ┌─────────────────────────────────────────────┐
-│ Streamlit    │ ────────────▶ │ FastAPI（async）  鉴权 · 限流 · 输入校验      │
-│ demo         │ ◀──────────── │                    Redis：token bucket+缓存   │
+│ Vue Frontend │ ────────────▶ │ FastAPI（async）  鉴权 · 限流 · 输入校验      │
+│ frontend/    │ ◀──────────── │                    Redis：token bucket+缓存   │
 └──────────────┘               └───────────────┬─────────────────────────────┘
                                                │ 创建/恢复会话
                     ┌──────────────────────────▼──────────────────────────┐
@@ -40,6 +40,8 @@
                     PostgreSQL(biz)        Redis            MinIO
                     datacrew_ro 只读角色    L1进程/L2Redis/L3PG 三级缓存   图表/导出
 ```
+客户端除 **Vue 3 SPA（`frontend/`，端口 5173）** 外，`demo/app.py` 的 Streamlit 界面
+保留为备用前端；两者消费同一份 SSE 事件契约（前端细节见 `frontend/README.md`）。
 
 状态机图（GitHub 可直接渲染；节点名与 app/agents/supervisor.py 一致）：
 
@@ -94,7 +96,8 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 | `app/application/` + `app/api/` | 问数用例 + FastAPI/SSE 端点（鉴权/限流） | ✅ 已完成 |
 | `app/loops.py` + `app/main.py` | Windows Selector 循环工厂 + 服务入口 | ✅ 已完成 |
 | `eval/` | 120 条评测集构建 + runner + 报告 | D3 |
-| `demo/` | Streamlit 演示 | D3 |
+| `demo/` | Streamlit 演示（备用前端，`streamlit run demo/app.py`） | D3 |
+| `frontend/` | Vue 3 问数控制台：SSE 消费 + 澄清/审批交互 + 图表鉴权下载（14 项 vitest 单测） | D8 |
 | `tests/` | 安全闸单测 / agent 集成测 / eval 回归门禁 | 全程 |
 
 ## 5. 快速开始
@@ -116,12 +119,18 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 &\.venv\Scripts\python.exe -m app.main
 #    另开终端跑 API 冒烟（鉴权/澄清恢复/审批恢复全链路）
 &\.venv\Scripts\python.exe scripts\smoke_api.py
+# 5. 启动 Vue 前端（另开终端；dev 经 Vite proxy 转发到 :8000，免 CORS）
+cd frontend
+npm install
+npm run dev          # http://localhost:5173（X-API-Key 默认 dev-key-001，界面可改）
+cd ..
 
-# 5. 测试与 lint
+# 6. 测试与 lint（后端 pytest 与前端 vitest 分开计）
 &\.venv\Scripts\python.exe -m pytest tests/ -q
 &\.venv\Scripts\python.exe -m ruff check app/ tests/ scripts/
+cd frontend; npm run build; npm test; cd ..
 
-# 6. 后续：demo / eval / 压测
+# 7. 后续：demo / eval / 压测
 ```
 
 ## 6. 构建路线图（每天 10h，AI 辅助编码）
