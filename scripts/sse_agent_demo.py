@@ -10,7 +10,10 @@
     [返回] 工具经 MCP 送回的结果摘要
     [最终答案] LLM 组织好的回答                 ← 答案在这
 """
-import asyncio, json, os, sys
+import asyncio
+import json
+import os
+import sys
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI

@@ -33,7 +33,9 @@ import redis.asyncio as aioredis
 SEED = 42
 NOW = datetime(2026, 9, 30, 23, 59, 59, tzinfo=UTC)  # 数据截止时间
 HISTORY_DAYS = 365
-ADMIN_DSN = "postgresql://postgres:postgres@localhost:5432/ecommerce"
+# DSN 默认 5432（与 docker compose / CI service 一致），但允许 PG_ADMIN_DSN 覆盖——
+# 曾因硬编码导致本地复现 CI 时写错库（真实事故），切库必须显式可配。
+ADMIN_DSN = os.environ.get("PG_ADMIN_DSN", "postgresql://postgres:postgres@localhost:5432/ecommerce")
 
 SCALES = {  # (默认条数, 每批条数)
     "users": (50_000, 50_000),
