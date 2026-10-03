@@ -46,15 +46,6 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
         <p v-if="apiOk === false" class="side-hint">后端未响应：确认 datacrew-app 容器在跑，或本地 <code>python -m app.main</code></p>
       </div>
 
-      <div class="side-block">
-        <div class="side-label">本机能力</div>
-        <ul class="cap-list">
-          <li><b>4 个 Agent</b><span>检索 / 生成 / 执行 / 洞察</span></li>
-          <li><b>七道安全闸</b><span>AST · 白名单 · 只读事务</span></li>
-          <li><b>人机协同</b><span>澄清追问 · 人工审批</span></li>
-          <li><b>MCP 工具底座</b><span>schema / sql / sandbox / chart</span></li>
-        </ul>
-      </div>
 
       <div class="side-foot">
         <span class="tag">LLM: mock</span>
@@ -103,14 +94,6 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
 .health.down .dot { background: var(--err); box-shadow: 0 0 10px var(--err); }
 .side-hint { font-size: 12px; color: var(--warn); margin: 0; line-height: 1.5; }
 .side-hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
-.cap-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.cap-list li {
-  display: flex; flex-direction: column; gap: 1px; padding: 10px 12px;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-}
-.cap-list b { font-size: 13px; }
-.cap-list span { font-size: 11.5px; color: var(--text-faint); font-family: var(--mono); }
-.side-foot { margin-top: auto; display: flex; gap: 6px; }
 
 /* ---- 右侧工作区 ---- */
 .workspace { min-width: 0; display: flex; flex-direction: column; }

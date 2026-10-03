@@ -3,7 +3,6 @@
 // 这里只负责状态分发与组件编排。
 import AskForm from '@/components/AskForm.vue'
 import SessionBar from '@/components/SessionBar.vue'
-import EventTimeline from '@/components/EventTimeline.vue'
 import ClarificationCard from '@/components/ClarificationCard.vue'
 import ApprovalCard from '@/components/ApprovalCard.vue'
 import ResultCard from '@/components/ResultCard.vue'
@@ -22,6 +21,7 @@ const PHASE_META: Record<string, { label: string; tone: string }> = {
   approving: { label: '等待人工审批', tone: 'warn' },
   done: { label: '已完成', tone: 'ok' },
   error: { label: '失败', tone: 'err' },
+  cancelled: { label: '已取消', tone: '' },
 }
 function phaseLabel(): string {
   return PHASE_META[state.value.phase]?.label ?? state.value.phase
@@ -74,7 +74,7 @@ function phaseTone(): string {
 
       <ResultCard v-if="state.result" :result="state.result" :api-key="apiKey" />
 
-      <EventTimeline :timeline="state.timeline" />
+      <p v-if="state.phase === 'cancelled'" class="cancel-banner rise">本轮已取消，没有产生结果。轨迹保留在上方供参考。</p>
 
       <div v-if="state.phase === 'error' && state.error" class="card error-card rise">
         <div class="card-title" style="color: var(--err);">本轮失败</div>

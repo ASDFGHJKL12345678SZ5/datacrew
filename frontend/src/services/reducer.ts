@@ -2,7 +2,7 @@
 // 与后端边界：这里的 action 只来自 SSE 事件，不掺任何网络/UI 细节。
 import type { AskEvent, ClarificationEvent, ApprovalEvent, ResultEvent, NodeDoneEvent } from '@/types/events'
 
-export type Phase = 'idle' | 'running' | 'clarifying' | 'approving' | 'done' | 'error'
+export type Phase = 'idle' | 'running' | 'clarifying' | 'approving' | 'done' | 'error' | 'cancelled'
 
 export interface TimelineEntry {
   node: string
@@ -30,6 +30,7 @@ export type AskAction =
   | { type: 'start'; question: string }
   | { type: 'event'; ev: AskEvent }
   | { type: 'reset' }
+  | { type: 'cancel' }
 
 export function askReducer(state: AskState, action: AskAction): AskState {
   switch (action.type) {
@@ -37,6 +38,9 @@ export function askReducer(state: AskState, action: AskAction): AskState {
       return { ...initialState, phase: 'running', question: action.question }
     case 'reset':
       return initialState
+    case 'cancel':
+      // 用户主动取消：保留问题与已产出的轨迹作为证据，但明确标记未完成
+      return { ...state, phase: 'cancelled' }
     case 'event':
       return applyEvent(state, action.ev)
   }
