@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 会话与鉴权栏：session_id 可编辑（改它就开新会话）；API Key 运行时注入。
+// 会话与鉴权：session_id 可编辑（改它就开新会话）；API Key 运行时注入（不烧进产物）。
 defineProps<{
   sessionId: string
   apiKey: string
@@ -14,16 +14,16 @@ const emit = defineEmits<{
 
 <template>
   <div class="session-bar">
-    <label>
-      会话 ID
+    <label class="field">
+      <span>会话 ID</span>
       <input
         :value="sessionId"
         placeholder="同一 ID 的状态跨请求延续"
         @input="emit('update:sessionId', ($event.target as HTMLInputElement).value)"
       />
     </label>
-    <label>
-      API Key（X-API-Key）
+    <label class="field key">
+      <span>API Key</span>
       <input
         :value="apiKey"
         type="password"
@@ -31,20 +31,17 @@ const emit = defineEmits<{
         @input="emit('update:apiKey', ($event.target as HTMLInputElement).value)"
       />
     </label>
-    <button class="btn" :disabled="running" @click="emit('reset')">清空本轮</button>
+    <button class="btn btn-ghost" :disabled="running" @click="emit('reset')">清空本轮</button>
   </div>
 </template>
 
 <style scoped>
 .session-bar {
-  display: flex; gap: 18px; align-items: flex-end; flex-wrap: wrap;
-  background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 12px; padding: 12px 16px; margin-bottom: 14px;
+  display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap;
+  padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
 }
-label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); flex: 1; min-width: 200px; }
-input {
-  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-  color: var(--text); padding: 7px 11px; font: inherit; font-size: 13px;
-}
-input:focus { outline: none; border-color: var(--accent); }
+.field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 180px; }
+.field span { font-size: 11px; color: var(--text-faint); letter-spacing: 1px; }
+.field.key { max-width: 220px; }
+.field input { font-family: var(--mono); font-size: 12.5px; padding: 6px 10px; }
 </style>

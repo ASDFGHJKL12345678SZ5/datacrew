@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 结果表预览：截断展示（latency_ms 26 的数量级不值得把 5 万行都塞进 DOM）。
+// 结果表预览：截断展示（5 万行不值得塞进 DOM）。
 import { computed } from 'vue'
 
 const props = defineProps<{
@@ -29,15 +29,21 @@ function cell(v: unknown): string {
         </tr>
       </tbody>
     </table>
-    <p v-if="rows && rows.length > MAX_ROWS" class="muted">
+    <p v-if="rows && rows.length > MAX_ROWS" class="faint">
       仅预览前 {{ MAX_ROWS }} 行，共 {{ rows.length }} 行
     </p>
   </div>
+  <p v-else class="faint">查询未返回行数据。</p>
 </template>
 
 <style scoped>
-.table-wrap { overflow: auto; max-height: 320px; margin: 8px 0; }
-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
-th, td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; white-space: nowrap; }
-th { background: var(--bg-elevated); position: sticky; top: 0; }
+.table-wrap { overflow: auto; max-height: 340px; border: 1px solid var(--border); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-family: var(--mono); }
+th, td { border-bottom: 1px solid var(--border); padding: 7px 12px; text-align: left; white-space: nowrap; }
+th {
+  background: var(--panel-2); position: sticky; top: 0; color: var(--text-dim);
+  font-weight: 600; letter-spacing: 0.5px;
+}
+tbody tr:hover { background: var(--accent-soft); }
+td { color: var(--text); }
 </style>
