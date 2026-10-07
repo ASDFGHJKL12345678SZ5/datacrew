@@ -82,6 +82,11 @@ async def _events_after_stream(graph, config) -> AsyncIterator[dict[str, Any]]:
     }
 
 
+# 【维护约定】往 AgentState 加"每轮产物"字段时，必须同步加进本字典，否则旧
+# checkpoint 的值会漏进新一轮（典型症状：上一轮的 error 挂在新一轮成功结果上）。
+# 反过来，**要跨轮保留的字段绝不能进这里**——长期记忆（偏好）刻意不走 AgentState，
+# 而是落在 mem.preferences（见 app/infra/memory.py），所以它天然不受本重置影响。
+#
 # 每轮问数开始前重置的字段（最终审查修复：同 session 二次提问状态污染）。
 # thread_id=session_id 意味着旧 checkpoint 的字段会延续到新一轮：不清洗的话，
 # 上一轮的 clarified_answer 会让新一轮的歧义问题永不再追问、上一轮的 error

@@ -26,6 +26,7 @@ from app.infra.cache import healthcheck as redis_health
 from app.infra.cache import token_bucket
 from app.infra.db import close_pools, init_pools
 from app.infra.db import healthcheck as pg_health
+from app.infra.memory import ensure_memory_schema
 from app.infra.storage import get_storage
 
 log = get_logger(__name__)
@@ -37,6 +38,8 @@ MAX_QUESTION_LEN = 500
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     setup_logging(get_settings().log_level)
     await init_pools()
+    # 记忆表幂等创建（已存在则 no-op）：老库/CI 库不必手工跑 DDL 就能获得记忆能力
+    await ensure_memory_schema()
     log.info("api.started")
     yield
     await close_pools()

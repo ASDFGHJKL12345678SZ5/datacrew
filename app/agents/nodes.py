@@ -28,6 +28,12 @@ from app.agents.prompts import (
 from app.agents.state import AgentState
 from app.core.logging import get_logger
 from app.infra.db import admin_pool  # noqa: TID252  数据截止日查询
+from app.infra.memory import (
+    explicitly_stated,
+    load_preferences,
+    mark_preference_used,
+    remember_preference,
+)
 from app.tools.chart_gen import generate_chart
 from app.tools.schema_search import search_schema
 from app.tools.sql_execute import execute_sql
@@ -85,6 +91,13 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     # 1. 检索 schema（关键词匹配，D2 后期升级 pgvector 语义检索）
     schema_context = await search_schema(question, top_k=5)
 
+    # 1.5 记忆检索（长期记忆读路径，降级为空 dict）：本会话已确认过的口径偏好。
+    # 刻意**不**把偏好拼进提示词——真实模型看到"用户偏好 X"可能直接返回
+    # ambiguity=null，那样 clarified_answer 不会被写入，口径反而丢了。
+    # 偏好只作用于"要不要打断用户"这一个决策点，其余链路完全不变。
+    session_id = state.get("session_id") or ""
+    prefs = await load_preferences(session_id)
+
     # 2. LLM 分析歧义（已有澄清回答时把回答并入问题，消除歧义）
     analysis_question = question
     if state.get("clarified_answer"):
@@ -111,13 +124,40 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     # 3. 歧义处理：未澄清过才追问（澄清过的直接放行，防止死循环）
     ambiguity = analysis.get("ambiguity")
     if ambiguity and not state.get("clarified_answer"):
+        term = str(ambiguity.get("term") or "").strip()
+        options = [str(o) for o in (ambiguity.get("options") or [])]
+        remembered = prefs.get(term) if term else None
+        # 本轮问题里已经自己说出口径 -> 以当场表述为准，不套历史偏好
+        stated = any(explicitly_stated(question, o) for o in options)
+
+        if remembered and not stated:
+            # ---- 记忆命中：不再打断用户，直接沿用上次确认过的口径 ----
+            await mark_preference_used(session_id, term)
+            log.info(
+                "clarification.preference_applied",
+                extra={"context": {"term": term, "choice": remembered[:40]}},
+            )
+            return {
+                "schema_context": schema_context,
+                "ambiguity": None,  # 已由偏好消解，本轮不存在未决歧义
+                "clarified_answer": remembered,
+                "data_as_of": as_of,
+                "status": "running",
+                "trace": [_step("schema_curator", started, clarified=True,
+                                preference_applied=remembered)],
+            }
+
         answer = interrupt({
             "type": "clarification",
             "question": ambiguity["question"],
-            "options": ambiguity.get("options", []),
+            "options": options,
         })
-        # ---- 恢复执行：用户回答注入状态 ----
+        # ---- 恢复执行：用户回答注入状态，并**沉淀为长期记忆**（记忆写路径）----
+        # 抽取不需要 LLM：interrupt payload 已经给了结构化的 term，用户回答就是 choice。
+        # 这里同步 await（~1ms 的 upsert）：确定性可测优于 fire-and-forget，
+        # 且失败静默降级，最坏结果是下次再问一遍。
         log.info("clarification.answered", extra={"context": {"answer": answer}})
+        await remember_preference(session_id, term, str(answer))
         return {
             "schema_context": schema_context,
             "ambiguity": ambiguity,

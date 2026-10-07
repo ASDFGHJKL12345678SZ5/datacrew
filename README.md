@@ -90,14 +90,14 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 | `deploy/postgres/init/` | schema（含埋点）、最小权限角色、评测表 | ✅ 已完成 |
 | `app/core/` | 配置（单一入口）、结构化 JSON 日志（stderr） | ✅ 已完成 |
 | `scripts/generate_mock_data.py` | 合成 mock 数据（5w 用户/50w 订单，含埋点） | ✅ 已完成 |
-| `app/infra/` | PG/Redis/对象存储/LLM 客户端（可替换适配器）+ Langfuse 观测（可降级） | ✅ 已完成 |
+| `app/infra/` | PG/Redis/对象存储/LLM 客户端（可替换适配器）+ Langfuse 观测（可降级）+ **偏好记忆**（长期记忆，可降级） | ✅ 已完成 |
 | `app/tools/` | MCP Server（4 工具）+ 七道安全闸 + Python 沙箱 + SVG 图表（58 条单测） | ✅ 已完成 |
 | `app/agents/` | Supervisor 状态机 + 四 Agent 节点 + Mock LLM（CI 可回归） | ✅ 已完成 |
 | `app/application/` + `app/api/` | 问数用例 + FastAPI/SSE 端点（鉴权/限流） | ✅ 已完成 |
 | `app/loops.py` + `app/main.py` | Windows Selector 循环工厂 + 服务入口 | ✅ 已完成 |
 | `eval/` | 120 条评测集构建 + runner + 报告 | D3 |
 | `demo/` | Streamlit 演示（备用前端，`streamlit run demo/app.py`） | D3 |
-| `frontend/` | Vue 3 问数控制台：SSE 消费 + 澄清/审批交互 + 图表鉴权下载（14 项 vitest 单测） | D8 |
+| `frontend/` | Vue 3 问数控制台：SSE 消费 + 澄清/审批交互 + 图表鉴权下载 + 执行轨迹（54 项 vitest 单测，含设计系统基件、App 外壳冒烟与流式管道回归） | D8 |
 | `tests/` | 安全闸单测 / agent 集成测 / eval 回归门禁 | 全程 |
 
 ## 5. 快速开始
@@ -165,6 +165,7 @@ cd frontend; npm run build; npm test; cd ..
 - **D7：为什么 CI 服务镜像必须是 pgvector 而不是官方 postgres:16**：`deploy/postgres/init/01_schema.sql` 需要 `CREATE EXTENSION vector`，官方镜像没带 pgvector，CI 初始化步骤必红（`extension "vector" is not available`）。CI 服务镜像必须与 `deploy/` 下同一套 SQL 的要求一致——CI 与本地 compose 共用 init 脚本的设计反过来要求镜像也统一。曾用错镜像，已修复并留此 ADR。
 - **D7：interrupt 恢复的隐藏成本（面试深挖点）**
 - **D8：评测驱动的迭代（mock 测管线，真实测质量）**：mock 模式 18.3% 全绿不代表系统好——换成真实 DeepSeek 后 simple_agg 仅 8%，三轮迭代到 40%：①"必须指出歧义"的提示词被指令遵循能力强的模型放大成逢词必拆（22/25 误追问）→ 保守原则+反例+few-shot；②相对时间按系统今天算而金标按数据截止日 → 注入 orders.max(created_at) 作锚点；③模型自发加问题里没有的时间过滤 → 明令禁止；④真实模型偶发非法 JSON 致 23s 自愈卡死 → 解析失败立即重试。**方法论：每轮修一个根因、复测同一子集、记录成本（¥0.009/题）。**
+- **D9：长期记忆为什么只做"偏好"，且抽取不用 LLM**：Agent 记忆常被讲成三层——工作记忆（节点内当场组装 prompt）/ 短期记忆（LangGraph checkpointer：任务状态，跨请求可恢复）/ 长期记忆（本项目的 `mem.preferences`：会话级口径偏好）。只做偏好这一种的判据是"**有没有结构化的写入来源**"：澄清中断的 payload 已经带 `term/options`，用户的选择就是 `(term → choice)`，**一条 upsert 即落库，抽取根本不需要 LLM**；反之"把对话摘要塞进向量库"在没有召回场景时只是增加故障面。四条约束：①作用域 = `session_id`（当前无用户体系；换 user_id 只改这一个参数）；②**记忆表不对 datacrew_ro 授权**——注入由应用层完成，Agent 生成的 SQL 永远读不到它（记忆是"应用替 Agent 记住"，不是"Agent 自己去查记忆"）；③全链路 fail-soft（记忆库挂了最坏是重新追问一次）；④**偏好只在"要不要打断用户"这一个决策点生效，刻意不拼进提示词**——真实模型看到"用户偏好 X"可能直接返回 `ambiguity=null`，那样 `clarified_answer` 不会被写入、口径反而丢了。生效边界：用户本轮**自己说出口径**时记忆让位（`explicitly_stated`，当场表述优先），**新会话不继承**（评测集每题独立 session，改动前后逐条一致）。
 - **D7：子进程不继承父进程的协议管道 stdin（MCP stdio 死等事故）**：python_sandbox 在单测里全过、连上 MCP stdio server 后**每次必超时**。根因：`subprocess.run` 默认让子进程继承父进程 stdin，而 MCP server 的 stdin 正是与客户端通信的协议管道——子进程拿着这个句柄永远完不了（实测：默认继承 → communicate 死等 10s 超时；显式 `stdin=subprocess.DEVNULL` → 70ms 正常返回）。**触发条件是"运行在协议管道环境里"，所以单元测试根本抓不到**——已补 tests/test_mcp_integration.py：真实 spawn stdio server 走 JSON-RPC 调 4 个工具，专治这类"只在集成形态下现形"的 bug。通用纪律：凡是要起子进程的服务（MCP server、systemd socket 服务、uwsgi worker），一律显式给 stdin DEVNULL 或具体 fd，别继承。：LangGraph 的 resume 会**从节点开头重跑**，不是从中断点续跑——用户回答澄清后，`schema_curator` 的 schema 检索与 LLM 分析会完整再执行一遍（interrupt 之前的 IO 不落 checkpoint）；executor 的审批恢复会再跑一次 SQL 校验（只读、不执行）后再放行。恢复的正确性由框架保证，重复成本由架构消化：中断前的 IO 都是幂等的（检索/校验），真正有副作用的动作（执行 SQL、写 MinIO）全部放在 interrupt 之后。
 - **D3：为什么结果集哈希要双排序 + 数值格式化**：金标 SQL 与 Agent SQL 的列顺序、ORDER BY 不保证一致，1.5 与 1.50 也是同一答案。行内值排序 + 行排序 + 2 位小数，把"表示差异"从"语义差异"里剥出来，否则评测会系统性冤枉正确答案。
 - **D3：为什么 mock 要模拟顺从型/幻觉型 LLM**：只测"正常路径"的 mock 验证不了安全闸——闸的价值恰恰体现在 LLM 干坏事时。mock 按危险意图照单全写、按幻觉维度硬写不存在的列，让 CI 无 Key 也能端到端验证 10 类攻击全部被拦。
@@ -191,7 +192,7 @@ cd frontend; npm run build; npm test; cd ..
 | 数据质量 | 外键孤儿 0 行；金额不一致订单 0 单；三类埋点全部就位 | verify 六项检查 |
 | 双 11 尖峰 | 19,323 单/日 vs 平日 1,262 单/日（15.3 倍） | verify 尖峰检查 |
 | 用户集中度 | Top100 用户贡献 1.2% 订单，单人最高 69 单 | verify 帕累托检查 |
-| 安全闸单测 | 28/28 通过（每道闸配攻击用例） | `pytest tests/` |
+| 安全闸单测 | 55/55 通过（`tests/test_sql_guard.py`，每道闸配攻击用例；D1 初版为 28） | `pytest tests/test_sql_guard.py` |
 | MCP 联通 | 4 个工具经 MCP stdio 协议被客户端发现**并逐一调用成功**（正常查询/攻击拦截/沙箱计算/沙箱禁网/图表生成/图表错误输入六条路径） | `scripts/smoke_mcp.py` |
 | 业务查询延迟 | 聚合查询端到端 39ms（含七道闸+只读事务） | `scripts/smoke_tools.py` |
 | 攻击拦截 | 多语句注入 / pg_sleep / 未授权表（eval.queries）均被拒并记录 WARNING 日志 | smoke 测试输出 |
@@ -204,7 +205,7 @@ cd frontend; npm run build; npm test; cd ..
 
 | 指标 | 实测值 | 来源 / 复现方式 |
 |---|---|---|
-| 测试总量 | 123/123 通过（55 安全闸 + 20 图表 + 10 沙箱 + 7 控制流集成 + 5 评测哈希 + 4 checkpointer + 3 观测降级 + 7 MCP stdio 集成 + 12 最终审查回归） | `pytest tests/`（checkpointer/eval_hash/MCP 集成需 PG 环境） |
+| 测试总量 | **130/130** 通过（55 安全闸 + 20 图表 + 10 沙箱 + 7 控制流集成 + 5 评测哈希 + 4 checkpointer + 3 观测降级 + 7 MCP stdio 集成 + 12 最终审查回归 + **7 记忆层**） | `pytest tests/`（checkpointer/eval_hash/MCP 集成/记忆需 PG 环境） |
 | 控制流覆盖 | 澄清中断恢复 / SQL 自愈 / 审批批准 / 审批优雅拒绝 / 无歧义直达 五条全过 | `tests/test_state_machine.py` |
 | 自愈行为 | 错误列名 sale_amount → 回灌 schema → 改用 pay_amount，1 次重试成功（3 渠道 3 行真实数据） | 集成测试 + API 冒烟 |
 | 审批兜底 | 批准大表扫描后自动 LIMIT 1000（审批语义是"允许扫表"不是"允许灌爆上下文"） | API 冒烟第 4 步 |
@@ -268,3 +269,34 @@ D7 复核（2026-09-29）：并发 10 复跑两次 QPS 22.3/22.8、P50 280/300ms
 2. **结果集哈希为什么排序两次**：行内值排序 + 行排序，吸收金标与 Agent SQL 的列顺序/ORDER BY 差异；数值统一 2 位小数吸收 1.5 vs 1.50。不这么做，"对不上"会是归一化差异而不是答案错误——这是评测系统最常见的事故。
 3. **为什么 mock 要模拟"屡教不改的 LLM"**：安全闸的价值不依赖 LLM 变聪明。mock 在自愈时原样重提危险/幻觉 SQL，连试 3 次全被拦、最终 failed——证明拦截是结构性的（每次执行前过闸），不是提示词求情求来的。
 4. **gold_sql 为什么不能让 Agent 读到**：`eval.queries` 存标准答案，可读即可作弊。DB 角色不授权 eval schema，从权限设计上断绝作弊路径——评测的信任根在数据库权限，不在代码自觉。
+
+---
+
+## 12. 记忆层实测数据（长期记忆的证据链）
+
+Agent 记忆按三层落地（对照"工作 / 短期 / 长期"框架）：
+
+| 层 | 本项目实现 | 生命周期 | 存储 |
+|---|---|---|---|
+| 工作记忆 | 节点内当场组装 prompt（schema_context / 证据块 / 错误回灌），不落盘 | 单次 LLM 调用 | — |
+| 短期记忆 | LangGraph checkpointer：任务状态（sql / insight / 澄清 / 审批 / retry） | 会话内、跨请求 | PG（thread_id = session_id） |
+| 长期记忆 | `mem.preferences`：会话级口径偏好（"销售额 = 实付"） | 跨轮次 | PG `mem` schema（**不对 datacrew_ro 授权**） |
+
+为什么长期记忆只做"偏好"、且**抽取不用 LLM**：澄清中断的 payload 已经带 `term/options`，用户回答就是 `(term → choice)`——**一条 upsert 即落库**。没有"结构化写入来源"的记忆（如把对话摘要塞进向量库）在没有召回场景时只增加故障面。设计细节见 §7 ADR D9。
+
+实测（`python eval/preference_probe.py`：双轮场景 + 反向对照）：
+
+| 指标 | 实测 | 含义 |
+|---|---|---|
+| `preference_hit` | **3/3 = 100%** | 第 1 轮澄清 → 沉淀；第 2 轮同 session 再问**不再追问**且口径沿用（trace 带 `preference_applied` 标记） |
+| `fresh_session_guard` | **3/3 = 100%** | 全新 session 问同一问题**仍然澄清**——证明记忆没有污染新会话 |
+| 后端测试 | **130/130** | 含 7 项记忆层测试（词干判定 / 读写幂等 / 偏好闭环 / 新会话回归 / 显式口径优先） |
+| 120 条主评测集 | **22/120 = 18.3%** | 与改动前基线**逐项一致**：记忆不改变单轮题目的行为 |
+| 跨轮持久性 | 二次运行测试仍全绿 | 靠 `tests/conftest.py` 清理测试会话的记忆——**跨轮持久状态必须由测试自己隔离**，否则"应触发澄清"的断言会在第二次运行时假失败 |
+
+面试深挖点（记忆层）：
+1. **checkpointer ≠ 记忆**：它存的是"状态机跑到哪、产物是什么"（任务状态表），不是"用户说过什么"。它让**中断能恢复**，但不让 Agent **记住上下文**——所以本项目另做了一层偏好记忆，两者职责不重叠。
+2. **知识库 ≠ 长期记忆**：`biz.metric_definitions` 里的 pgvector 存的是**外部灌入的知识**；长期记忆是**从交互中抽取并沉淀**的偏好。一个是读的，一个要写。
+3. **偏好为什么不拼进提示词**：真实模型看到"用户偏好 销售额=实付"可能直接返回 `ambiguity=null`，那样 `clarified_answer` 不会被写入、口径反而丢了。偏好只作用于"要不要打断用户"这一个决策点——**最小作用面**。
+4. **记忆的生效边界**：用户本轮自己说出口径时记忆让位（`explicitly_stated`，当场表述优先），新会话不继承。**做过界的记忆比没有记忆更危险**（会静默覆盖用户的显式意图）。
+5. **为什么测试要清记忆**：记忆是**跨轮持久**的，测试若不隔离持久状态，"应触发澄清"的断言会在第二次运行时假失败（第一次写记忆、第二次命中记忆）——"测试必须自己隔离状态"的典型反例。

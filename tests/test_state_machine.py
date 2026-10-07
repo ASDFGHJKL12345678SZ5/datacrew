@@ -11,9 +11,8 @@ from langgraph.types import Command
 
 from app.agents.supervisor import build_graph
 from app.core.config import get_settings
-from app.infra.cache import close_redis
-from app.infra.db import close_pools, init_pools
 
+# db_pools（PG 池 + 记忆表隔离）在 tests/conftest.py，全模块共用
 pytestmark = pytest.mark.usefixtures("db_pools")
 
 
@@ -21,15 +20,6 @@ def _graph():
     # interrupt/resume 的暂停状态必须由 checkpointer 持久化：
     # 测试用 InMemorySaver，生产用 PostgresSaver（见 supervisor.get_checkpointer）
     return build_graph(checkpointer=InMemorySaver())
-
-
-@pytest.fixture()
-async def db_pools():
-    # 每个测试独立的 PG 池 + Redis 连接（跨事件循环复用会报 Event loop is closed）
-    await init_pools()
-    yield
-    await close_pools()
-    await close_redis()
 
 
 async def _pending_interrupt(graph, config) -> dict | None:
