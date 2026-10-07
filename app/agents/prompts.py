@@ -72,7 +72,8 @@ SQL_GENERATOR_SYSTEM = """你是 PostgreSQL 专家。根据问题、数据表结
 5. 对大表（orders/order_items/traffic_logs）的查询必须带 WHERE 条件
 6. 聚合查询不需要 LIMIT；非聚合查询会自动包裹 LIMIT
 7. 时间过滤优先用 pay_time（实付）/ created_at（下单），按指标口径选择
-8. 问城市/地区：biz.orders 没有城市列，必须 JOIN biz.users u ON u.id = o.user_id 后按 u.city 过滤或分组
+8. 问城市/地区：biz.orders 没有城市列，必须 JOIN biz.users u（ON u.id = o.user_id）
+   后按 u.city 过滤或分组
 9. 先想清楚查什么（推理过程写在 reasoning），再写 SQL
 
 【形态 → SQL 写法】口径注册表里每条都标了形态（【】里），必须按形态写：

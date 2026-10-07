@@ -23,9 +23,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from generate_mock_data import METRIC_DEFINITIONS  # noqa: E402
+
 from app.infra.cache import close_redis, get_redis  # noqa: E402
 from app.infra.db import admin_pool, close_pools, init_pools  # noqa: E402
-from generate_mock_data import METRIC_DEFINITIONS  # noqa: E402
 
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
