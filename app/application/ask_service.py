@@ -106,6 +106,7 @@ _FRESH_TURN_FIELDS: dict[str, Any] = {
     "insight": None,
     "status": "running",
     "error": None,
+    "refusal": None,
 }
 
 

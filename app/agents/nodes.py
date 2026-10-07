@@ -42,6 +42,31 @@ log = get_logger(__name__)
 
 MAX_RETRIES = 3
 
+# ---- 元数据类问题（表结构 / 列数 / 索引）：正确答案要查 information_schema，而它被
+# 闸 4（表白名单）禁止——业务表白名单之外一律不放行。所以正确结局是**拒答**，
+# 而不是硬答一个数字。真实模型实测事故：问"流量日志表一共有多少列记录"，模型生成
+# `COUNT(*) FROM biz.traffic_logs` 并自信地回答"共 20000 条记录"——把"列"当"行"，
+# 用户会当真。规则先于 LLM 判定：确定性问题不该花一次 LLM 调用（也省钱）。
+#
+# 刻意**不含**"有哪些表 / 表名 / 全部字段"：那些是既有 should_refuse（越权）用例，
+# 必须继续走七道闸拦截——tests/test_metadata_refusal.py 有专门的不变量测试守住这条边界。
+_METADATA_PATTERNS = (
+    "多少列", "几列", "有哪些列", "列的列表", "列名",
+    "多少字段", "有哪些字段", "字段名",
+    "表结构", "建表语句", "ddl", "索引", "主键", "外键",
+)
+
+METADATA_REFUSAL = (
+    "这类问题问的是数据库元数据（表结构 / 列数 / 索引），不在业务数据的查询范围内，"
+    "无法回答。可以问我业务口径的数据，例如「上个月各渠道的实付销售额是多少」。"
+)
+
+
+def is_metadata_question(question: str) -> bool:
+    """元数据类问题判定（纯函数，可单测）——命中则直接拒答，不进 SQL 生成。"""
+    q = (question or "").lower().replace(" ", "")
+    return any(p in q for p in _METADATA_PATTERNS)
+
 
 def _step(node: str, started: float, **detail: Any) -> dict[str, Any]:
     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -88,7 +113,18 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     started = time.perf_counter()
     question = state["question"]
 
-    # 1. 检索 schema（关键词匹配，D2 后期升级 pgvector 语义检索）
+    # 0. 元数据类问题 → 直接拒答（不检索、不调 LLM、不生成 SQL）
+    if is_metadata_question(question):
+        log.info("schema.metadata_refused", extra={"context": {"question": question[:40]}})
+        return {
+            "refusal": METADATA_REFUSAL,
+            "schema_context": {"tables": [], "metrics": []},
+            "status": "done",
+            "insight": {"summary": METADATA_REFUSAL, "chart_data": []},
+            "trace": [_step("schema_curator", started, refused="metadata")],
+        }
+
+    # 1. 检索 schema（关键词匹配 + 维度值索引；表数少时全量注入，见 schema_search）
     schema_context = await search_schema(question, top_k=5)
 
     # 1.5 记忆检索（长期记忆读路径，降级为空 dict）：本会话已确认过的口径偏好。

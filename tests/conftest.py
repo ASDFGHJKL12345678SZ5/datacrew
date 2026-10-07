@@ -17,6 +17,7 @@ from app.infra.memory import ensure_memory_schema, forget_preferences
 TEST_SESSIONS = (
     "s1", "s2", "s3", "s4", "s5", "s6", "s7",
     "mem-loop", "mem-hit", "mem-fresh", "mem-explicit",
+    "meta-1", "meta-2", "meta-3", "eval-city-1", "eval-city-2", "eval-city-3",
 )
 
 

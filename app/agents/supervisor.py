@@ -7,6 +7,7 @@
                         +----------------------+             v
                                                        insight_writer -> END
     executor --(重试耗尽/用户拒绝)--> END(failed)
+    schema_curator --(元数据类问题)--> END(refused：拒答话术走 result.summary)
 
 三条控制流（本项目的面试核心叙事）：
     1. 澄清：schema_curator 内 interrupt() —— 口径歧义时暂停，追问用户后恢复
@@ -38,6 +39,18 @@ from app.core.logging import get_logger
 log = get_logger(__name__)
 
 Route = Literal["sql_generator", "insight_writer", "__end__"]
+CuratorRoute = Literal["sql_generator", "__end__"]
+
+
+def _route_after_curator(state: AgentState) -> CuratorRoute:
+    """curator 之后：元数据类问题已拒答，直接终止（不生成 SQL、不碰数据库）。
+
+    新增这条边的理由：拒答是**终态**，不能继续走 sql_generator——否则模型会为
+    "有多少列"编一条 COUNT(*) 并答出错误数字（真实模型实测过）。
+    """
+    if state.get("refusal"):
+        return END
+    return "sql_generator"
 
 
 def _route_after_executor(state: AgentState) -> Route:
@@ -65,7 +78,11 @@ def build_graph(checkpointer=None):
     builder.add_node("insight_writer", insight_writer_node)
 
     builder.add_edge(START, "schema_curator")
-    builder.add_edge("schema_curator", "sql_generator")
+    builder.add_conditional_edges(
+        "schema_curator",
+        _route_after_curator,
+        {"sql_generator": "sql_generator", END: END},
+    )
     builder.add_edge("sql_generator", "executor")
     builder.add_conditional_edges(
         "executor",

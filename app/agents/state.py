@@ -61,6 +61,9 @@ class AgentState(TypedDict, total=False):
     # ---- InsightWriter 产物 ----
     insight: dict[str, Any] | None     # {"summary": str, "chart_data": [...]}
 
+    # ---- 拒答（元数据类问题：表结构/列数/索引，正确答法被表白名单禁止）----
+    refusal: str | None                # 拒答话术；非错误，是正常终态（status=done）
+
     # ---- 全程 ----
     status: str                        # running|clarifying|awaiting_approval|done|failed
     error: str | None                  # 终态失败原因（给用户看的话术）
