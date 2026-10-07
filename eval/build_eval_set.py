@@ -176,8 +176,9 @@ MULTI_JOIN: list[tuple[str, str, str]] = [
     ("加购到购买的转化用户数",
      "SELECT COUNT(DISTINCT t.user_id) AS cnt FROM biz.traffic_logs t WHERE t.event_type = 'cart' AND EXISTS (SELECT 1 FROM biz.orders o WHERE o.user_id = t.user_id)",
      "IN 子查询"),
+    # 连带率：与 biz.metric_definitions 的注册口径一致（总件数 / 订单数，统计全部订单）
     ("各商品品类的连带率（平均每单件数）",
-     "SELECT p.category, ROUND(AVG(oi.quantity), 2) AS avg_q FROM biz.order_items oi JOIN biz.products p ON oi.product_id = p.id GROUP BY p.category ORDER BY avg_q DESC",
+     "SELECT p.category, ROUND(SUM(oi.quantity)::numeric / NULLIF(COUNT(DISTINCT oi.order_id),0), 2) AS attach_rate FROM biz.order_items oi JOIN biz.products p ON oi.product_id = p.id GROUP BY p.category ORDER BY attach_rate DESC",
      "连带率口径"),
     ("双 11 当天各品类的销量",
      "SELECT p.category, SUM(oi.quantity) AS q FROM biz.orders o JOIN biz.order_items oi ON o.id = oi.order_id JOIN biz.products p ON oi.product_id = p.id WHERE o.created_at >= '2025-11-11' AND o.created_at < '2025-11-12' GROUP BY p.category ORDER BY q DESC",
@@ -191,10 +192,15 @@ MULTI_JOIN: list[tuple[str, str, str]] = [
     ("件单价最高的品类 Top3",
      "SELECT p.category, ROUND(AVG(oi.price), 2) AS avg_price FROM biz.order_items oi JOIN biz.products p ON oi.product_id = p.id GROUP BY p.category ORDER BY avg_price DESC LIMIT 3",
      "件单价口径"),
-    ("退款率最高的渠道",
-     "SELECT channel, ROUND(100.0 * SUM(CASE WHEN order_status = 'refunded' THEN 1 ELSE 0 END) / COUNT(*), 2) AS refund_rate FROM biz.orders GROUP BY channel ORDER BY refund_rate DESC",
+    # 退款率：分母必须是"支付成功单"（与注册表口径一致）——旧金标用 COUNT(*)（全部订单），
+    # 导致模型照注册表作答反被判错；history 里这道题从未通过过。
+    # 题面与判据必须一致（L6 不变量）：金标给的是**分渠道排名**，所以题面写"各渠道…排名"，
+    # 而不是"最高的渠道"（后者自然答案是 Top-1，会让答对的模型被判错——实测踩过）。
+    ("各渠道退款率排名",
+     "SELECT channel, ROUND(100.0 * SUM(CASE WHEN order_status = 'refunded' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN order_status IN ('paid','refunded') THEN 1 ELSE 0 END), 0), 2) AS refund_rate FROM biz.orders GROUP BY channel ORDER BY refund_rate DESC",
      "退款率口径"),
-    (" unpaid 订单占比（created 状态）",
+    # 同上：金标按渠道分组，题面必须体现"各渠道"（原题面问整体、还带了个前导空格）
+    ("各渠道未支付订单占比（created 状态）",
      "SELECT channel, ROUND(100.0 * SUM(CASE WHEN order_status = 'created' THEN 1 ELSE 0 END) / COUNT(*), 2) AS unpaid_pct FROM biz.orders GROUP BY channel ORDER BY unpaid_pct DESC",
      "未支付率"),
     ("各渠道 GMV（含取消退款）",
@@ -292,9 +298,10 @@ METRIC_DEF: list[tuple[str, str, str]] = [
     ("整体取消率",
      "SELECT ROUND(100.0 * SUM(CASE WHEN order_status = 'cancelled' THEN 1 ELSE 0 END) / COUNT(*), 2) AS cancel_rate FROM biz.orders",
      "口径：取消单/总单"),
+    # 同上：与注册表口径对齐（分母 = 支付成功单）
     ("整体退款率",
-     "SELECT ROUND(100.0 * SUM(CASE WHEN order_status = 'refunded' THEN 1 ELSE 0 END) / COUNT(*), 2) AS refund_rate FROM biz.orders",
-     "口径：退款单/总单"),
+     "SELECT ROUND(100.0 * SUM(CASE WHEN order_status = 'refunded' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN order_status IN ('paid','refunded') THEN 1 ELSE 0 END), 0), 2) AS refund_rate FROM biz.orders",
+     "口径：退款单/支付成功单（注册表口径）"),
     ("下单用户数（去重）",
      "SELECT COUNT(DISTINCT user_id) AS cnt FROM biz.orders",
      "口径：distinct user"),

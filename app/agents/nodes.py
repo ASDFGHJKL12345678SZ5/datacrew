@@ -80,9 +80,12 @@ def _fmt_schema_context(schema_context: dict[str, Any]) -> str:
         lines.append(f"  biz.{t['name']}({', '.join(t['columns'])})")
     metrics = schema_context.get("metrics", [])
     if metrics:
-        lines.append("\n指标口径（必须遵守）：")
+        lines.append("\n指标口径（必须遵守，【】里是该口径的形态，按形态写 SQL）：")
         for m in metrics:
-            lines.append(f"  {m['metric_name']}: {m['definition']}\n    SQL提示: {m['sql_hint']}")
+            lines.append(
+                f"  {m['metric_name']}【{m.get('usage_hint') or '整体类'}】: {m['definition']}"
+                f"\n    SQL提示: {m['sql_hint']}"
+            )
     return "\n".join(lines)
 
 

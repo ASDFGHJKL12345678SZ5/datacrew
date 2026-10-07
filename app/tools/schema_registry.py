@@ -102,7 +102,7 @@ async def load_metric_definitions(use_cache: bool = True) -> list[dict]:
     async with admin_pool().acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT metric_name, definition, sql_hint
+            SELECT metric_name, definition, sql_hint, usage_hint
             FROM biz.metric_definitions
             ORDER BY metric_name
             """

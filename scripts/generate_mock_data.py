@@ -63,6 +63,99 @@ TRAFFIC_EVENTS = ["view", "click", "cart", "order"]
 TRAFFIC_W = [0.60, 0.25, 0.10, 0.05]
 
 
+# ============================================================================
+# 指标口径注册表（唯一事实源：seeder 与 scripts/sync_metric_definitions.py 共用）
+# ============================================================================
+METRIC_DEFINITIONS: list[tuple[str, str, str, str]] = [
+    # ---- 整体类（单一标量）----
+    ("GMV", "所有下单订单的成交总额（含取消/退款单），取 orders.gmv_amount 求和，不过滤 order_status",
+     "SELECT SUM(gmv_amount) FROM biz.orders WHERE created_at >= $1 AND created_at < $2",
+     "整体类：返回单一标量"),
+    ("实付销售额", "支付成功的订单实付金额总和，取 orders.pay_amount 求和，order_status IN ('paid','refunded')",
+     "SELECT SUM(pay_amount) FROM biz.orders WHERE order_status IN ('paid','refunded') AND pay_time >= $1 AND pay_time < $2",
+     "整体类：返回单一标量；可按渠道/城市/品类/时间分组（即成分组类）"),
+    ("客单价", "实付销售额 / 支付成功订单数",
+     "SELECT SUM(pay_amount)/NULLIF(COUNT(*),0) FROM biz.orders WHERE order_status IN ('paid','refunded')",
+     "整体类：单一标量"),
+    ("下单用户数", "统计周期内产生订单的去重用户数",
+     "SELECT COUNT(DISTINCT user_id) FROM biz.orders WHERE created_at >= $1 AND created_at < $2",
+     "整体类：单一标量"),
+    ("订单量", "订单数 COUNT(*)，含全部 order_status（=下单数，不存在是否只算支付的追问）",
+     "SELECT COUNT(*) FROM biz.orders WHERE created_at >= $1 AND created_at < $2",
+     "分组类：可按城市/渠道/品类/时间多维分组"),
+    ("销量", "商品件数合计 SUM(order_items.quantity)",
+     "SELECT SUM(i.quantity) FROM biz.order_items i JOIN biz.orders o ON o.id=i.order_id WHERE o.created_at >= $1 AND o.created_at < $2",
+     "分组类：可按品类/商品/时间分组"),
+    ("购买用户数", "按维度分组的去重下单用户数 COUNT(DISTINCT orders.user_id)；按品类分组需 JOIN order_items+products",
+     "SELECT p.category, COUNT(DISTINCT o.user_id) FROM biz.orders o JOIN biz.order_items i ON o.id=i.order_id JOIN biz.products p ON i.product_id=p.id GROUP BY p.category",
+     "分组类：分子是去重用户数（不是订单数）"),
+    ("件单价", "成交单价的平均值 AVG(order_items.price)（**不是 SUM(price)/SUM(quantity)**）",
+     "SELECT p.category, AVG(i.price) FROM biz.order_items i JOIN biz.products p ON i.product_id=p.id GROUP BY p.category",
+     "分组类/排名类：按品类分组后按件单价降序取 TopN"),
+    ("连带率", "品类平均每单件数 = 该品类销量总件数 / 该品类所在订单数（统计全部订单，含取消/退款单，不额外过滤 order_status）",
+     "SELECT p.category, SUM(i.quantity)::numeric / NULLIF(COUNT(DISTINCT i.order_id),0) FROM biz.order_items i JOIN biz.products p ON p.id=i.product_id GROUP BY p.category",
+     "分组类：分母是该品类所在订单数（COUNT DISTINCT order_id）"),
+    ("日均订单量", "统计周期订单总数 / 天数",
+     "SELECT COUNT(*)::numeric / GREATEST(EXTRACT(EPOCH FROM ($2::timestamptz - $1::timestamptz))/86400, 1) FROM biz.orders WHERE created_at >= $1 AND created_at < $2",
+     "整体类：单一标量"),
+    ("新用户数", "首次下单时间落在统计周期内的用户数",
+     "SELECT COUNT(*) FROM (SELECT user_id, MIN(created_at) first_order FROM biz.orders GROUP BY user_id) t WHERE first_order >= $1 AND first_order < $2",
+     "整体类：单一标量"),
+    ("老用户", "统计周期开始**之前**已下过单的用户（用于'老用户复购率'等）",
+     "SELECT DISTINCT user_id FROM biz.orders WHERE created_at < $1",
+     "整体类：作为子查询的用户集合使用"),
+    ("日活用户", "当日有任意行为（浏览/点击/加购/下单）的去重用户数，数据源 traffic_logs",
+     "SELECT COUNT(DISTINCT user_id) FROM biz.traffic_logs WHERE ts >= $1 AND ts < $2 AND user_id IS NOT NULL",
+     "整体类：单一标量"),
+    # ---- 占比类（本组值 / 全表合计 × 100，两位小数）----
+    ("渠道销售额占比", "各渠道实付销售额 / 全部渠道实付销售额合计（以百分比表示，保留两位小数）",
+     "SELECT channel, ROUND(100.0 * SUM(pay_amount) / (SELECT SUM(pay_amount) FROM biz.orders WHERE order_status IN ('paid','refunded')), 2) FROM biz.orders WHERE order_status IN ('paid','refunded') GROUP BY channel",
+     "占比类：分母=全表合计（标量子查询，不带分组条件）"),
+    ("维度销售额占比", "某一维度的实付销售额 / 全部实付销售额合计（以百分比表示，保留两位小数）",
+     "SELECT p.category, ROUND(100.0 * SUM(o.pay_amount) / (SELECT SUM(pay_amount) FROM biz.orders WHERE order_status IN ('paid','refunded')), 2) FROM biz.orders o JOIN biz.order_items i ON o.id=i.order_id JOIN biz.products p ON i.product_id=p.id WHERE o.order_status IN ('paid','refunded') GROUP BY p.category",
+     "占比类：分母是**全表**合计，不是本组；按品类/城市/渠道分组均可"),
+    ("TopN 贡献占比", "按用户实付金额降序取前 N 名，这 N 名的合计 / 全部用户实付合计（百分比、两位小数）",
+     "SELECT ROUND(100.0 * (SELECT SUM(pay) FROM (SELECT SUM(pay_amount) pay FROM biz.orders WHERE order_status IN ('paid','refunded') GROUP BY user_id ORDER BY pay DESC LIMIT $1) t) / (SELECT SUM(pay_amount) FROM biz.orders WHERE order_status IN ('paid','refunded')), 2)",
+     "占比类：分子是 TopN 子查询的合计"),
+    ("未支付占比", "未支付订单（order_status='created'）数 / 全部订单数（百分比、两位小数）",
+     "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status='created') / NULLIF(COUNT(*),0), 2) FROM biz.orders",
+     "占比类：可加 GROUP BY channel 等维度；分母是全部订单"),
+    # ---- 排名类（排序 + TopN）----
+    ("商品销量TopN", "按销量（SUM(order_items.quantity)）降序的商品前 N 名",
+     "SELECT i.product_id, SUM(i.quantity) qty FROM biz.order_items i JOIN biz.orders o ON o.id=i.order_id WHERE o.order_status IN ('paid','refunded') GROUP BY i.product_id ORDER BY qty DESC LIMIT $1",
+     "排名类：默认销量降序；可加品类等筛选条件"),
+    ("下单金额TopN用户", "按用户实付金额（SUM(orders.pay_amount)，**实付口径不是 GMV**）降序的前 N 个用户",
+     "SELECT user_id, SUM(pay_amount) total FROM biz.orders WHERE order_status IN ('paid','refunded') GROUP BY user_id ORDER BY total DESC LIMIT $1",
+     "排名类：**下单金额 = 实付金额**（反直觉，必须按此口径）"),
+    # ---- 人均类（先聚合再平均）----
+    ("人均订单金额", "该维度订单的 AVG(orders.pay_amount)（**订单级平均**：先按维度筛选订单再取平均；不是'每个用户先汇总再平均'）",
+     "SELECT AVG(o.pay_amount) FROM biz.orders o JOIN biz.order_items i ON o.id=i.order_id JOIN biz.products p ON i.product_id=p.id WHERE p.category = $1 AND o.order_status IN ('paid','refunded')",
+     "人均类：**对订单取平均**（反直觉，别先按用户汇总）"),
+    ("平均下单频次", "先按用户聚合下单次数 COUNT(*)，再对所有用户取 AVG",
+     "SELECT AVG(cnt) FROM (SELECT o.user_id, COUNT(*) cnt FROM biz.orders o JOIN biz.users u ON o.user_id=u.id WHERE u.channel_source = $1 GROUP BY o.user_id) t",
+     "人均类：子查询先聚合到用户，再 AVG"),
+    # ---- 转化类（人数或订单数的比率/交集）----
+    ("复购率", "周期内下单 2 次及以上的用户数 / 有下单的用户数（以百分比表示，保留两位小数）",
+     "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE cnt >= 2)::numeric / NULLIF(COUNT(*),0), 2) FROM (SELECT user_id, COUNT(*) cnt FROM biz.orders WHERE created_at >= $1 AND created_at < $2 GROUP BY user_id) t",
+     "转化类：分母是有下单的用户数；可加'老用户'等用户集合条件"),
+    ("退款率", "退款订单数 / 支付成功订单数（分母是支付成功单，不是全部订单；以百分比表示，保留两位小数；可按渠道/时间分组，分组后按值排序即得退款率最高的渠道）",
+     "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status='refunded')::numeric / NULLIF(COUNT(*) FILTER (WHERE order_status IN ('paid','refunded')),0), 2) FROM biz.orders",
+     "转化类：**分母是支付成功单**（反直觉，别用全部订单）；可分组"),
+    ("下单转化率", "下单用户数 / 活跃用户数（traffic_logs 去重；以百分比表示，保留两位小数）",
+     "SELECT ROUND(100.0 * COUNT(DISTINCT o.user_id)::numeric / NULLIF(COUNT(DISTINCT t.user_id),0), 2) FROM biz.orders o FULL JOIN biz.traffic_logs t ON o.user_id=t.user_id WHERE o.created_at >= $1 AND o.created_at < $2",
+     "转化类：分子=下单用户数、分母=活跃用户数（都是去重人数）"),
+    ("取消率", "取消订单数 / **全部订单数**（注意与退款率不同：退款率的分母是支付成功单；以百分比表示，保留两位小数）",
+     "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status='cancelled')::numeric / NULLIF(COUNT(*),0), 2) FROM biz.orders",
+     "转化类：分母是**全部订单**（与退款率不同），可加维度分组"),
+    ("下单到支付转化率", "支付成功订单数（paid/refunded）/ 全部下单数（百分比、两位小数）",
+     "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status IN ('paid','refunded'))::numeric / NULLIF(COUNT(*),0), 2) FROM biz.orders",
+     "转化类：分子分母都是**订单数**（不是用户数）"),
+    ("加购到购买转化用户数", "既是加购用户（traffic_logs.event_type='cart'）又有下单记录的去重用户数（**是人数，不是比率**）",
+     "SELECT COUNT(DISTINCT t.user_id) FROM biz.traffic_logs t WHERE t.event_type='cart' AND EXISTS (SELECT 1 FROM biz.orders o WHERE o.user_id=t.user_id)",
+     "转化类：输出**人数**（不是百分比）；交集语义用 EXISTS"),
+]
+
+
 def weighted_choice(rng: random.Random, pairs: list[tuple[str, float]]) -> str:
     r = rng.random()
     acc = 0.0
@@ -236,35 +329,20 @@ async def load_data(scale: float, dsn: str) -> None:
         print(f"[gen] traffic_logs 写入 {len(traffic):,} 行")
 
         # 指标口径注册表（embedding 留空，D2 灌向量）
-        metrics = [
-            ("GMV", "所有下单订单的成交总额（含取消/退款单），取 orders.gmv_amount 求和，不过滤 order_status",
-             "SELECT SUM(gmv_amount) FROM biz.orders WHERE created_at >= $1 AND created_at < $2"),
-            ("实付销售额", "支付成功的订单实付金额总和，取 orders.pay_amount 求和，order_status IN ('paid','refunded')",
-             "SELECT SUM(pay_amount) FROM biz.orders WHERE order_status IN ('paid','refunded') AND pay_time >= $1 AND pay_time < $2"),
-            ("客单价", "实付销售额 / 支付成功订单数",
-             "SELECT SUM(pay_amount)/NULLIF(COUNT(*),0) FROM biz.orders WHERE order_status IN ('paid','refunded')"),
-            ("下单用户数", "统计周期内产生订单的去重用户数",
-             "SELECT COUNT(DISTINCT user_id) FROM biz.orders WHERE created_at >= $1 AND created_at < $2"),
-            ("复购率", "周期内下单 2 次及以上的用户数 / 有下单的用户数",
-             "SELECT COUNT(*) FILTER (WHERE cnt >= 2)::numeric / NULLIF(COUNT(*),0) FROM (SELECT user_id, COUNT(*) cnt FROM biz.orders WHERE created_at >= $1 AND created_at < $2 GROUP BY user_id) t"),
-            ("退款率", "退款订单数 / 支付成功订单数",
-             "SELECT COUNT(*) FILTER (WHERE order_status='refunded')::numeric / NULLIF(COUNT(*) FILTER (WHERE order_status IN ('paid','refunded')),0) FROM biz.orders"),
-            ("日均订单量", "统计周期订单总数 / 天数",
-             "SELECT COUNT(*)::numeric / GREATEST(EXTRACT(EPOCH FROM ($2::timestamptz - $1::timestamptz))/86400, 1) FROM biz.orders WHERE created_at >= $1 AND created_at < $2"),
-            ("渠道销售额占比", "各渠道实付销售额 / 总实付销售额",
-             "SELECT channel, SUM(pay_amount) FROM biz.orders WHERE order_status IN ('paid','refunded') GROUP BY channel"),
-            ("商品销量TopN", "按销量排序的商品（order_items.quantity 汇总）",
-             "SELECT i.product_id, SUM(i.quantity) qty FROM biz.order_items i JOIN biz.orders o ON o.id=i.order_id WHERE o.order_status IN ('paid','refunded') GROUP BY i.product_id ORDER BY qty DESC LIMIT $1"),
-            ("新用户数", "首次下单时间落在统计周期内的用户数",
-             "SELECT COUNT(*) FROM (SELECT user_id, MIN(created_at) first_order FROM biz.orders GROUP BY user_id) t WHERE first_order >= $1 AND first_order < $2"),
-            ("日活用户", "当日有任意行为（浏览/点击/加购/下单）的去重用户数，数据源 traffic_logs",
-             "SELECT COUNT(DISTINCT user_id) FROM biz.traffic_logs WHERE ts >= $1 AND ts < $2 AND user_id IS NOT NULL"),
-            ("下单转化率", "下单用户数 / 活跃用户数（traffic_logs 去重）",
-             "SELECT COUNT(DISTINCT o.user_id)::numeric / NULLIF(COUNT(DISTINCT t.user_id),0) FROM biz.orders o FULL JOIN biz.traffic_logs t ON o.user_id=t.user_id WHERE o.created_at >= $1 AND o.created_at < $2"),
-        ]
+        # ------------------------------------------------------------------
+        # 【单位约定】比率类一律"百分比 + 两位小数"：ROUND(100.0 * 分子 / 分母, 2)
+        # 【形态约定】usage_hint 的首段是**形态词汇**（受控词表，有测试守住）：
+        #   整体类 = 单一标量；分组类 = 按维度给每组聚合值；占比类 = 本组/全表合计×100；
+        #   排名类 = 排序取 TopN；人均类 = 先聚合到用户/订单再取平均；转化类 = 人数或订单数的比率/交集
+        # L4 生成层按形态选 SQL 形态（见 prompts 的"形态 → SQL 写法"约定）。
+        # 【为什么这么细】真实模型实测：失败几乎全部来自"术语 → 算式"的映射缺失。其中有些
+        #   约定是**反直觉**的（"下单金额"是实付不是 GMV；"人均订单金额"是订单级 AVG 而不是
+        #   每用户汇总再平均）——模型推不出来，只能显式登记。评测集服从本表（ADR D11）。
+        # ------------------------------------------------------------------
+        metrics = METRIC_DEFINITIONS
         await conn.execute("TRUNCATE biz.metric_definitions RESTART IDENTITY")
         await conn.executemany(
-            "INSERT INTO biz.metric_definitions(metric_name, definition, sql_hint) VALUES ($1,$2,$3)",
+            "INSERT INTO biz.metric_definitions(metric_name, definition, sql_hint, usage_hint) VALUES ($1,$2,$3,$4)",
             metrics)
         print(f"[gen] metric_definitions 写入 {len(metrics)} 条（embedding 待 D2 灌入）")
     finally:

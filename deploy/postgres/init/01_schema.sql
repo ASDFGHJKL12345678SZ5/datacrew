@@ -63,7 +63,9 @@ CREATE INDEX idx_items_product ON biz.order_items(product_id);
 CREATE TABLE biz.metric_definitions (
     id           SERIAL PRIMARY KEY,
     metric_name  VARCHAR(64) UNIQUE NOT NULL,       -- GMV / 实付销售额 / 客单价 / 复购率 ...
-    definition   TEXT NOT NULL,
-    sql_hint     TEXT,
+    definition   TEXT NOT NULL,                      -- 业务定义（含单位/精度约定）
+    sql_hint     TEXT,                               -- 参考算式
+    usage_hint   TEXT NOT NULL DEFAULT '',           -- 形态 + 用法：整体类/分组类/占比类/排名类/人均类/转化类
+                                                     -- （L4 生成层按形态选 SQL 形态；见 prompt 的形态约定）
     embedding    vector(1024)                       -- BGE-M3 输出维度 1024
 );
