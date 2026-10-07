@@ -97,7 +97,7 @@ sql_generator（最多 3 轮，executor 的 RetryPolicy(max_attempts=2) 兜瞬�
 | `app/loops.py` + `app/main.py` | Windows Selector 循环工厂 + 服务入口 | ✅ 已完成 |
 | `eval/` | 120 条评测集构建 + runner + 报告 | D3 |
 | `demo/` | Streamlit 演示（备用前端，`streamlit run demo/app.py`） | D3 |
-| `frontend/` | Vue 3 问数控制台：SSE 消费 + 澄清/审批交互 + 图表鉴权下载 + 执行轨迹（54 项 vitest 单测，含设计系统基件、App 外壳冒烟与流式管道回归） | D8 |
+| `frontend/` | Vue 3 问数控制台：SSE 消费 + 澄清/审批交互 + 图表鉴权下载 + 执行轨迹（55 项 vitest 单测，含设计系统基件、App 外壳冒烟与流式管道回归） | D8 |
 | `tests/` | 安全闸单测 / agent 集成测 / eval 回归门禁 | 全程 |
 
 ## 5. 快速开始

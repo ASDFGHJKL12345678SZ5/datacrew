@@ -10,7 +10,7 @@
 npm install
 npm run dev        # http://localhost:5173
 npm run build      # vue-tsc 类型检查 + vite build
-npm test           # vitest：54 项单测（含 13 项组件/旅程测试，jsdom）
+npm test           # vitest：55 项单测（含 13 项组件/旅程测试，jsdom）
 ```
 
 dev 模式经 Vite proxy 转发 `/ask` `/ask/resume` `/files` `/health` 到 :8000，
