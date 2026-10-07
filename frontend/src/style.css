@@ -1,5 +1,10 @@
-/* ===== DataCrew 设计系统：夜间问数驾驶舱 ===== */
+/* ===== DataCrew 设计系统：夜间问数驾驶舱 =====
+ * 分层：tokens（唯一颜色/字体来源）→ reset → 元素 → 基件样式（btn/card/tag…）
+ *      → 动效 → 无障碍。基件组件（components/base/*）只消费 token，不硬编码颜色。
+ * 改主题只动这一份；组件内 scoped 样式只做布局，不重新定义视觉。
+ */
 :root {
+  /* 色板：深空驾驶舱 */
   --bg: #070c17;
   --bg-glow: radial-gradient(1100px 500px at 85% -10%, #14203d 0%, transparent 60%),
              radial-gradient(800px 400px at -10% 110%, #0e1b33 0%, transparent 55%);
@@ -19,9 +24,24 @@
   --ok: #3ddc97;
   --warn: #fbbf24;
   --err: #ff6b6b;
+  /* 语义色-软背景（标签/横幅用，避免组件里散落 rgba） */
+  --ok-soft: rgba(61, 220, 151, 0.08);
+  --warn-soft: rgba(251, 191, 36, 0.08);
+  --err-soft: rgba(255, 107, 107, 0.08);
+
   --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+
+  /* 形状与阴影 */
+  --radius-s: 8px;
+  --radius-m: 11px;
+  --radius-l: 14px;
   --shadow: 0 8px 28px rgba(2, 6, 16, 0.5);
+  --shadow-sm: 0 2px 10px rgba(2, 6, 16, 0.35);
+
+  /* 节奏 */
+  --gap: 16px;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; }
@@ -37,12 +57,15 @@ body {
 
 button { font: inherit; cursor: pointer; }
 code, pre, .mono { font-family: var(--mono); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 
-/* ---- 按钮 ---- */
+/* ---- 按钮（基件 BaseButton 的地衣；直接写 class 的老用法也保留兼容） ---- */
 .btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   border: 1px solid var(--border-strong); background: var(--panel-2); color: var(--text);
-  border-radius: 9px; padding: 7px 16px; font-size: 13px; font-weight: 500;
-  transition: border-color .15s, background .15s, transform .05s;
+  border-radius: var(--radius-s); padding: 7px 16px; font-size: 13px; font-weight: 500;
+  transition: border-color .15s, background .15s, transform .05s, filter .15s;
+  white-space: nowrap;
 }
 .btn:hover:not(:disabled) { border-color: var(--accent); background: var(--card-2); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
@@ -54,19 +77,20 @@ code, pre, .mono { font-family: var(--mono); }
 }
 .btn-primary:hover:not(:disabled) { filter: brightness(1.12); background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
 .btn-ok { background: var(--ok); border-color: var(--ok); color: #052e20; font-weight: 700; }
+.btn-ok:hover:not(:disabled) { filter: brightness(1.08); background: var(--ok); }
 .btn-err { background: transparent; border-color: var(--err); color: var(--err); }
-.btn-err:hover:not(:disabled) { background: rgba(255, 107, 107, 0.1); }
+.btn-err:hover:not(:disabled) { background: var(--err-soft); }
 .btn-ghost { background: transparent; border-color: var(--border); color: var(--text-dim); }
+.btn-sm { padding: 4px 12px; font-size: 12px; border-radius: 7px; }
 .btn .spin {
-  display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px;
+  display: inline-block; width: 12px; height: 12px; margin-right: 2px; vertical-align: -1px;
   border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff; border-radius: 50%;
   animation: spin 0.7s linear infinite;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---- 输入 ---- */
 input, textarea {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-s);
   color: var(--text); padding: 8px 12px; font: inherit; font-size: 13px; width: 100%;
   transition: border-color .15s, box-shadow .15s;
 }
@@ -78,20 +102,30 @@ input::placeholder, textarea::placeholder { color: var(--text-faint); }
 /* ---- 卡片 / 标签 ---- */
 .card {
   background: linear-gradient(180deg, var(--card), var(--panel));
-  border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px;
+  border: 1px solid var(--border); border-radius: var(--radius-l); padding: 18px 20px;
   box-shadow: var(--shadow);
 }
-.card + .card { margin-top: 16px; }
+.card + .card { margin-top: var(--gap); }
+.card-title {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 11px; letter-spacing: 2px; color: var(--text-faint);
+  text-transform: uppercase; font-weight: 600; margin-bottom: 10px;
+}
 .tag {
   display: inline-flex; align-items: center; gap: 5px; padding: 1px 10px; border-radius: 999px;
   font-size: 12px; font-family: var(--mono); border: 1px solid var(--border-strong); color: var(--text-dim);
+  background: var(--panel-2);
 }
-.tag.ok { color: var(--ok); border-color: rgba(61, 220, 151, 0.4); background: rgba(61, 220, 151, 0.08); }
-.tag.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08); }
-.tag.err { color: var(--err); border-color: rgba(255, 107, 107, 0.4); background: rgba(255, 107, 107, 0.08); }
+.tag.ok { color: var(--ok); border-color: rgba(61, 220, 151, 0.4); background: var(--ok-soft); }
+.tag.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); background: var(--warn-soft); }
+.tag.err { color: var(--err); border-color: rgba(255, 107, 107, 0.4); background: var(--err-soft); }
 .tag.accent { color: var(--accent); border-color: rgba(79, 140, 255, 0.4); background: var(--accent-soft); }
 .muted { color: var(--text-dim); }
 .faint { color: var(--text-faint); }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 pre {
   background: #060a13; border: 1px solid var(--border); border-radius: 10px;
   padding: 13px 16px; overflow: auto; margin: 8px 0; font-size: 12.5px; line-height: 1.6;
@@ -103,7 +137,18 @@ pre {
 }
 
 /* ---- 通用动效 ---- */
+@keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 .pulse { animation: pulse 1.4s ease-in-out infinite; }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-.rise { animation: rise 0.35s ease both; }
+.rise { animation: rise 0.35s var(--ease) both; }
+@keyframes caret { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+.stream-caret {
+  display: inline-block; width: 8px; height: 16px; margin-left: 3px; vertical-align: -2px;
+  background: var(--accent); animation: caret 0.9s step-end infinite;
+}
+
+/* 尊重系统减弱动效设置：转场/脉冲全关，状态变化靠颜色与文案承载 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}

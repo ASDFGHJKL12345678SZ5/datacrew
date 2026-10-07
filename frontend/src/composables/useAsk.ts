@@ -1,50 +1,58 @@
-import { reactive, ref, onScopeDispose } from 'vue'
+import { ref, onScopeDispose } from 'vue'
 import { askReducer, initialState, type AskState } from '@/services/reducer'
 import { askStream, resumeStream, ApiError } from '@/services/api'
-import { createRound, type Round } from '@/services/round'
-import { createHealthMonitor, type HealthDeps, type HealthMonitor, type HealthState } from '@/services/health'
+import { createRound, type Round, type Settlement } from '@/services/round'
+import { getSessionId, setSessionId, onSessionChange } from '@/services/session'
+import { useHealth } from '@/composables/useHealth'
 import type { AskEvent } from '@/types/events'
 
 // Vue 薄接线层：轮次生命周期/健康状态都在 services/ 的纯模块里（有单测锁行为）。
-// 这里只做三件事：把事件喂给 reducer、把轮次终态映射成 reducer 动作、把健康探针接上 fetch。
+// 这里只做三件事：把事件喂给 reducer、把轮次终态映射成 reducer 动作、把 SSE 接上 fetch。
+//
+// 重构要点（相对旧版）：
+//   1. 健康探测改用全局单例 useHealth()——侧栏状态灯与提问门控同源，
+//      不再一个是 setInterval 轮询、一个是状态机各跑各的；
+//   2. 会话 ID 走 services/session.ts 单一事实源，侧栏显示与实际使用不会分叉；
+//   3. API Key 支持运行时修改并持久化（localStorage），401/429 时改 key 即可续跑。
 
 const INACTIVITY_MS = 30_000
-const HEALTH_INTERVAL_MS = 15_000
-const HEALTH_TIMEOUT_MS = 6_000
 const DEFAULT_API_KEY = import.meta.env.VITE_API_KEY ?? 'dev-key-001'
 const LIVE_PHASES = ['running', 'clarifying', 'approving']
+const API_KEY_STORAGE = 'datacrew.apiKey'
 
-function probeHealth(signal: AbortSignal): Promise<boolean> {
-  return fetch('/health', { signal })
-    .then((r) => r.ok)
-    .catch(() => false)
+function loadApiKey(): string {
+  try {
+    return localStorage.getItem(API_KEY_STORAGE) || DEFAULT_API_KEY
+  } catch {
+    return DEFAULT_API_KEY // 存储不可用：内存态照样跑
+  }
 }
 
 export function useAsk() {
   const state = ref<AskState>({ ...initialState })
+  let round: Round | null = null
   const running = ref(false)
   const errorMessage = ref('')
-  const apiKey = ref(DEFAULT_API_KEY)
-  const sessionId = ref(localStorage.getItem('datacrew.sessionId') || 'demo-001')
-  let round: Round | null = null
+  const apiKey = ref(loadApiKey())
+  const sessionId = ref(getSessionId())
+  // 会话被别处（侧栏）修改时同步过来：单一事实源，不各持一份
+  const offSession = onSessionChange((v) => { sessionId.value = v })
+  onScopeDispose(offSession)
 
-  const healthOptions: HealthDeps = {
-    probe: probeHealth,
-    intervalMs: HEALTH_INTERVAL_MS,
-    probeTimeoutMs: HEALTH_TIMEOUT_MS,
+  // 健康：全局单例（App 壳与 AskView 共用同一个探测实程）
+  const { state: healthState, isDown: healthDown, probeNow } = useHealth()
+
+  function setSessionIdValue(v: string) {
+    setSessionId(v) // 模块内广播 → 上面的订阅会把 ref 同步过来
   }
-  const health: HealthMonitor = createHealthMonitor(healthOptions)
-  // Vue 层自持响应式状态，纯模块经回调通知（不能 reactive(health.state)：
-  // 纯模块按原始引用改对象，代理 setter 不触发——界面永远停在“探测中”，
-  // 见 tests/health.reactive.test.ts 的回归用例）。
-  const healthState = reactive<HealthState>({ ...health.state })
-  healthOptions.onStateChange = (s: HealthState) => Object.assign(healthState, s)
-  health.start()
-  onScopeDispose(() => health.stop())
 
-  function setSessionId(v: string) {
-    sessionId.value = v
-    localStorage.setItem('datacrew.sessionId', v)
+  function setApiKey(v: string) {
+    apiKey.value = v
+    try {
+      localStorage.setItem(API_KEY_STORAGE, v)
+    } catch {
+      /* 隐私模式：仅内存生效，不阻塞 */
+    }
   }
 
   function fail(msg: string) {
@@ -52,7 +60,7 @@ export function useAsk() {
     state.value = askReducer(state.value, { type: 'event', ev: { event: 'error', message: msg } })
   }
 
-  function onSettle(kind: string) {
+  function onSettle(kind: Settlement) {
     if (kind === 'cancelled' && LIVE_PHASES.includes(state.value.phase)) {
       state.value = askReducer(state.value, { type: 'cancel' })
     }
@@ -70,7 +78,7 @@ export function useAsk() {
       for await (const ev of gen) {
         if (r.settled) return // 已被取消/超时收口：迟到的事件不再改状态
         state.value = askReducer(state.value, { type: 'event', ev })
-        r.arm() // 每个事件都是“活着”的证据，重置 deadline
+        r.arm() // 每个事件都是"活着"的证据，重置 deadline
       }
       if (r.settled !== 'cancelled' && state.value.phase === 'running') {
         fail('连接中断：流已结束但未收到终态事件（澄清 / 审批 / 结果 / 错误）。请重试或检查后端')
@@ -133,7 +141,9 @@ export function useAsk() {
   }
 
   return {
-    state, running, errorMessage, apiKey, sessionId, setSessionId,
-    healthState, ask, answerClarification, decideApproval, cancel, reset,
+    state, running, errorMessage, apiKey, setApiKey,
+    sessionId, setSessionId: setSessionIdValue,
+    healthState, healthDown, probeNow,
+    ask, answerClarification, decideApproval, cancel, reset,
   }
 }

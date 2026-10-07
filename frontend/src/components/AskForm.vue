@@ -1,16 +1,28 @@
 <script setup lang="ts">
 // 提问命令栏：示例问题覆盖三条路径（正常问 / 模糊追问 / 大表审批），方便演示。
-import { ref } from 'vue'
+// textarea 随内容长高（4 行封顶），长问题不用在内嵌滚动条里打字。
+import { nextTick, ref, watch } from 'vue'
+import BaseButton from './base/BaseButton.vue'
 
 const props = defineProps<{ disabled: boolean }>()
 const emit = defineEmits<{ (e: 'submit', v: string): void }>()
 const question = ref('')
+const ta = ref<HTMLTextAreaElement | null>(null)
 
 const EXAMPLES = [
   { q: '上个月各渠道实付销售额是多少', kind: 'ok', label: '正常问' },
   { q: '销售额是多少', kind: 'warn', label: '澄清' },
   { q: '流量日志表一共有多少行记录', kind: 'accent', label: '审批' },
 ]
+
+async function autosize() {
+  await nextTick()
+  const el = ta.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 108) + 'px'
+}
+watch(question, autosize)
 
 function submit() {
   const q = question.value.trim()
@@ -23,15 +35,15 @@ function submit() {
     <div class="cmd">
       <span class="endpoint">POST <b>/ask</b></span>
       <textarea
+        ref="ta"
         v-model="question"
         rows="1"
         placeholder="用自然语言提问业务指标，例如：上个月各渠道实付销售额是多少"
         @keydown.enter.exact.prevent="submit"
       />
-      <button class="btn btn-primary" :disabled="disabled || !question.trim()" @click="submit">
-        <span v-if="disabled" class="spin" />
+      <BaseButton variant="primary" :disabled="disabled || !question.trim()" :loading="disabled" @click="submit">
         {{ disabled ? '执行中' : '提问' }}
-      </button>
+      </BaseButton>
     </div>
     <div class="examples">
       <span class="faint">试试：</span>
@@ -46,28 +58,28 @@ function submit() {
 <style scoped>
 .ask-form { display: flex; flex-direction: column; gap: 10px; }
 .cmd {
-  display: flex; align-items: stretch; gap: 10px;
-  background: var(--panel); border: 1px solid var(--border-strong); border-radius: 14px;
+  display: flex; align-items: flex-end; gap: 10px;
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius-l);
   padding: 10px 10px 10px 14px; box-shadow: var(--shadow);
   transition: border-color .15s;
 }
 .cmd:focus-within { border-color: var(--accent); }
 .endpoint {
-  display: flex; align-items: center; font-family: var(--mono); font-size: 12px;
+  display: flex; align-items: center; height: 36px; font-family: var(--mono); font-size: 12px;
   color: var(--text-faint); white-space: nowrap;
 }
 .endpoint b { color: var(--cyan); font-weight: 600; }
 .cmd textarea {
   border: none; background: transparent; box-shadow: none; resize: none;
-  font-size: 14px; padding: 8px 0; min-height: 24px;
+  font-size: 14px; padding: 8px 0; min-height: 20px; line-height: 1.6; max-height: 108px;
 }
 .cmd textarea:focus { box-shadow: none; }
-.cmd button { align-self: center; padding: 9px 22px; }
+.cmd :deep(.base-btn) { padding: 9px 22px; margin-bottom: 1px; }
 .examples { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }
 .chip {
   display: inline-flex; align-items: center; gap: 7px;
   background: var(--panel); border: 1px solid var(--border); color: var(--text-dim);
-  border-radius: 999px; padding: 3px 13px; font-size: 12px; transition: all .15s;
+  border-radius: 999px; padding: 3px 13px; font-size: 12px; transition: border-color .15s, color .15s, background .15s;
 }
 .chip b {
   font-family: var(--mono); font-size: 10px; padding: 0 6px; border-radius: 4px;

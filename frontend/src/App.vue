@@ -1,27 +1,19 @@
 <script setup lang="ts">
 // 应用外壳：左侧驾驶舱（品牌/连接状态/会话）+ 右侧主工作区。
-import { onMounted, onUnmounted, ref } from 'vue'
+// 重构点：健康灯不再自带 setInterval 轮询——与提问门控共用 useHealth() 单例，
+// "灯绿门关"之类两套探测各跑各的故事就此终结；侧栏会话 ID 直读 session 模块。
+import { computed } from 'vue'
+import { useHealth } from '@/composables/useHealth'
+import { getSessionId } from '@/services/session'
 
-const apiOk = ref<boolean | null>(null)
-let timer: number | undefined
+const { state: health, probeNow } = useHealth()
+const sessionId = computed(() => getSessionId())
 
-async function checkHealth() {
-  try {
-    // 6s 超时是必需的：容器被 docker pause 时 TCP 握手仍成功但永不响应，
-    // 没有超时的 fetch 会一直挂起，健康灯假装还是绿的。
-    const res = await fetch('/health', { signal: AbortSignal.timeout(6_000) })
-    apiOk.value = res.ok
-  } catch {
-    apiOk.value = false
-  }
+const HEALTH_TEXT: Record<string, string> = {
+  probing: '检测中',
+  ok: 'API 已连接 · :8000',
+  unreachable: 'API 不可达',
 }
-
-onMounted(() => {
-  checkHealth()
-  // 容器重启过：健康灯要能自己恢复，不能刷新页面才变绿
-  timer = window.setInterval(checkHealth, 15_000)
-})
-onUnmounted(() => { if (timer) window.clearInterval(timer) })
 </script>
 
 <template>
@@ -41,13 +33,31 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
 
       <div class="side-block">
         <div class="side-label">连接</div>
-        <div class="health" :class="apiOk === null ? 'unknown' : apiOk ? 'up' : 'down'">
+        <button class="health" :class="health.status" title="点击立即重新探测" @click="probeNow">
           <span class="dot" />
-          <span>{{ apiOk === null ? '检测中' : apiOk ? 'API 已连接 · :8000' : 'API 不可达' }}</span>
-        </div>
-        <p v-if="apiOk === false" class="side-hint">后端无响应：<code>docker ps</code> 看容器是否 Paused（是则 <code>docker unpause</code> 恢复），或本地起 <code>python -m app.main</code></p>
+          <span>{{ HEALTH_TEXT[health.status] ?? health.status }}</span>
+        </button>
+        <p v-if="health.status === 'unreachable'" class="side-hint">
+          后端无响应：<code>docker ps</code> 看容器是否 Paused（是则 <code>docker unpause</code> 恢复），
+          或本地起 <code>python -m app.main</code>
+        </p>
       </div>
 
+      <div class="side-block">
+        <div class="side-label">会话</div>
+        <div class="session-chip mono" title="checkpointer thread_id：同一 ID 跨请求延续状态">{{ sessionId }}</div>
+        <p class="side-hint">澄清 / 审批中断的恢复完全依赖此 ID，更换即开新会话线</p>
+      </div>
+
+      <div class="side-block">
+        <div class="side-label">链路</div>
+        <ul class="flow-list">
+          <li><i class="dot-cyan" />SchemaCurator</li>
+          <li><i class="dot-accent" />SQLGenerator</li>
+          <li><i class="dot-ok" />Executor · 七道闸</li>
+          <li><i class="dot-violet" />InsightWriter</li>
+        </ul>
+      </div>
 
       <div class="side-foot">
         <span class="tag">LLM: mock</span>
@@ -75,7 +85,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
   background: linear-gradient(180deg, #0a1120, #070c17);
   border-right: 1px solid var(--border);
   padding: 22px 18px; display: flex; flex-direction: column; gap: 22px;
-  position: sticky; top: 0; height: 100vh;
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
 }
 .brand { display: flex; gap: 12px; align-items: center; }
 .logo {
@@ -90,12 +100,30 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
   font-size: 11px; letter-spacing: 2px; color: var(--text-faint);
   text-transform: uppercase; font-weight: 600;
 }
-.health { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); font-family: var(--mono); }
+.health {
+  display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);
+  font-family: var(--mono); background: none; border: none; padding: 0; text-align: left;
+}
 .health .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; flex: none; }
 .health.up .dot { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
 .health.down .dot { background: var(--err); box-shadow: 0 0 10px var(--err); }
+.health.unreachable .dot { animation: pulse 1.4s ease-in-out infinite; }
 .side-hint { font-size: 12px; color: var(--warn); margin: 0; line-height: 1.5; }
 .side-hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+.session-chip {
+  font-size: 12.5px; color: var(--cyan); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.flow-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.flow-list li { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text-dim); }
+.flow-list i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dot-cyan { background: var(--cyan); }
+.dot-accent { background: var(--accent); }
+.dot-ok { background: var(--ok); }
+.dot-violet { background: var(--accent-2); }
+
+.side-foot { margin-top: auto; display: flex; gap: 8px; }
 
 /* ---- 右侧工作区 ---- */
 .workspace { min-width: 0; display: flex; flex-direction: column; }
@@ -108,7 +136,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
 @media (max-width: 920px) {
   .app-shell { grid-template-columns: 1fr; }
   .cockpit { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .cockpit .side-block:nth-child(3), .cockpit .side-foot { display: none; }
+  .cockpit .side-block:nth-child(4), .cockpit .side-foot { display: none; }
   .ws-header { padding: 16px 18px 4px; }
 }
 </style>
